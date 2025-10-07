@@ -20,7 +20,7 @@ except ImportError:
     MP_AVAILABLE = False
 
 MODEL_PATH = 'cnn_sign_language_model.h5'
-SMOOTH_WINDOW = 8
+SMOOTH_WINDOW = 3  # reduced for faster adaptation to new gesture
 MIN_CONFIDENCE = 0.5
 TEXT_FG_COLOR = (0, 255, 255)
 TEXT_BG_COLOR = (0, 0, 0)
@@ -28,8 +28,10 @@ FPS_FG_COLOR = (255, 255, 0)
 
 DEFAULT_MIRROR = True
 DETECTION_INTERVAL = 2
-INFERENCE_INTERVAL = 1
-DETECTION_DOWNSCALE = 1.3
+INFERENCE_INTERVAL = 2
+DETECTION_DOWNSCALE = 1.0
+# Extra padding around detected hand to avoid cropping fingers (increase if misclassifying)
+HAND_PADDING = 0.35  # fraction of bbox expansion inside detect_hand_bbox logic override
 
 CAPTURE_WIDTH = 640
 CAPTURE_HEIGHT = 480
@@ -129,6 +131,11 @@ def main():
 
     fallback_roi = None
 
+    # Debug features
+    debug = False  # toggled with 'g'
+    last_debug_print = 0
+    TOPK = 5
+
     mirror = DEFAULT_MIRROR
     pred_buf = collections.deque(maxlen=SMOOTH_WINDOW)
     last_label = ''
@@ -161,7 +168,7 @@ def main():
                         ds_h = int(h0 / DETECTION_DOWNSCALE)
                         det_small = cv2.resize(frame, (ds_w, ds_h), interpolation=cv2.INTER_LINEAR)
                         rgb = cv2.cvtColor(det_small, cv2.COLOR_BGR2RGB)
-                        bbox_small = detect_hand_bbox(rgb, hands, ds_w, ds_h)
+                        bbox_small = detect_hand_bbox(rgb, hands, ds_w, ds_h, padding=HAND_PADDING)
                         if bbox_small:
                             x1s, y1s, x2s, y2s = bbox_small
                             scale = DETECTION_DOWNSCALE
@@ -170,7 +177,7 @@ def main():
                             last_bbox = None
                     else:
                         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                        last_bbox = detect_hand_bbox(rgb, hands, w0, h0)
+                        last_bbox = detect_hand_bbox(rgb, hands, w0, h0, padding=HAND_PADDING)
                     last_detect_frame = frame_i
                 bbox = last_bbox
             else:
@@ -187,11 +194,20 @@ def main():
                 if x2 > x1 and y2 > y1:
                     if frame_i - last_infer_frame >= INFERENCE_INTERVAL:
                         roi = frame[y1:y2, x1:x2]
-                        proc = preprocess_roi(roi, target_size, int(C), grayscale)
+                        proc = preprocess_roi(roi, target_size, 1, grayscale=True)
                         batch = np.expand_dims(proc, 0)
                         last_probs = model.predict(batch, verbose=0)[0]
                         last_pred_idx = int(np.argmax(last_probs))
                         last_infer_frame = frame_i
+                        if debug:
+                            # Save occasional ROI for inspection
+                            if frame_i % 50 == 0:
+                                os.makedirs('debug_rois', exist_ok=True)
+                                cv2.imwrite(f'debug_rois/roi_{frame_i}.png', roi)
+                            # Simple stats check
+                            if frame_i - last_debug_print > 30:
+                                print(f'[DBG] proc stats min={proc.min():.3f} max={proc.max():.3f} mean={proc.mean():.3f}')
+                                last_debug_print = frame_i
                     if last_probs is not None:
                         idx = last_pred_idx
                         conf = float(last_probs[idx])
@@ -202,6 +218,21 @@ def main():
                         last_conf = float(voted_conf)
                         color = (0,200,0) if last_conf >= MIN_CONFIDENCE else (0,0,255)
                         cv2.rectangle(frame, (x1,y1), (x2,y2), color, 2)
+                        if debug and last_probs is not None:
+                            # Compose top-K prediction string
+                            topk_idx = np.argsort(last_probs)[-TOPK:][::-1]
+                            overlay_lines = [f'{labels[i]}:{last_probs[i]:.2f}' for i in topk_idx]
+                            for li, line in enumerate(overlay_lines):
+                                cv2.putText(frame, line, (x2+10, y1 + 20 + li*18), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (50,255,50), 1, cv2.LINE_AA)
+                            # Show preprocessed patch scaled for visual check
+                            preview = (proc if proc.shape[-1]==3 else proc[...,0])
+                            preview_disp = cv2.resize((preview*255).astype('uint8'), (112,112), interpolation=cv2.INTER_NEAREST)
+                            if len(preview_disp.shape)==2:
+                                preview_disp = cv2.cvtColor(preview_disp, cv2.COLOR_GRAY2BGR)
+                            # Put in top-right corner
+                            ph, pw = preview_disp.shape[:2]
+                            fh, fw = frame.shape[:2]
+                            frame[0:ph, fw-pw:fw] = preview_disp
                 else:
                     last_label = ''
             else:
@@ -237,6 +268,9 @@ def main():
                     print('[INFO] Detection interval already 1 (cannot toggle at runtime without code change)')
                 else:
                     print(f'[INFO] Detection interval fixed at {DETECTION_INTERVAL} (change constant and restart)')
+            elif k == ord('g'):
+                debug = not debug
+                print(f'[INFO] Debug mode = {debug}')
 
     finally:
         cap.release()
