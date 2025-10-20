@@ -219,12 +219,6 @@ This project is licensed under the MIT License - see the `LICENSE` file for deta
 - **OpenCV**: Computer vision library
 - **ASL Community**: For inspiration and validation
 
-## 📞 **Contact**
-
-**SouriRishik** - [GitHub](https://github.com/SouriRishik)
-
-**Project Link**: [https://github.com/SouriRishik/Sign-Language-Gesture-Analysis](https://github.com/SouriRishik/Sign-Language-Gesture-Analysis)
-
 ---
 
 ### 🚀 **Ready to Deploy?**
