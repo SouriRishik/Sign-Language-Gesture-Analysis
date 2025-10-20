@@ -213,6 +213,13 @@ def initialize_app():
         hands = None
         return True
 
+# Initialize the app components immediately when module is imported (for Gunicorn)
+print("🚀 Initializing ASL Recognition Server for deployment...")
+if not initialize_app():
+    print("❌ Failed to initialize. App will not work properly.")
+else:
+    print("✅ Server initialization complete!")
+
 def predict_from_image(image_data):
     """Process image exactly like opencv_demo.py"""
     try:
