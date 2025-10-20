@@ -11,7 +11,7 @@ This project recognizes **24 ASL letters** (A-Y, excluding J and Z which require
 - ✅ **Real-time ASL recognition** with webcam input
 - ✅ **Hand detection and bounding boxes** using MediaPipe
 - ✅ **Multiple interfaces**: Desktop app, localhost web app, and deployment-ready web app
-- ✅ **High accuracy**: 83%+ recognition rate
+- ✅ **High accuracy**: 95%+ recognition rate for most of the letters
 - ✅ **Mobile-friendly**: Responsive web interface for phones and tablets
 - ✅ **Live predictions**: Top-3 confidence scores with visual feedback
 - ✅ **Cross-platform**: Works on Windows, Mac, Linux, mobile devices
