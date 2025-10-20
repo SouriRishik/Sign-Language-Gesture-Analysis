@@ -132,9 +132,20 @@ def initialize_app():
 
     print(f'[INFO] Loading model {MODEL_PATH}')
     try:
+        # Force garbage collection before loading
+        import gc
+        gc.collect()
+        
         # Add more verbose loading
         print(f'[INFO] Model file size: {os.path.getsize(MODEL_PATH)} bytes')
+        
+        # Load with memory optimization
+        print(f'[INFO] Loading model with memory optimization...')
         model = tf.keras.models.load_model(MODEL_PATH, compile=False)
+        
+        # Optimize model for inference only
+        model.trainable = False
+        
         print(f'[INFO] Model loaded successfully!')
     except Exception as e:
         print(f'[ERROR] Failed to load model: {e}')
@@ -194,11 +205,11 @@ def initialize_app():
             import traceback
             traceback.print_exc()
             # Don't fail completely - try to continue without MediaPipe
-            print('[WARN] Continuing without MediaPipe - hand detection disabled')
+            print('[WARN] Continuing without MediaPipe - using center crop fallback')
             hands = None
             return True
     else:
-        print('[ERROR] MediaPipe not available - hand detection disabled')
+        print('[WARN] MediaPipe not available - using center crop fallback')
         hands = None
         return True
 
@@ -237,12 +248,17 @@ def predict_from_image(image_data):
         
         # Check if MediaPipe is available
         if hands is None:
-            print(f'[ERROR] MediaPipe hands is None')
-            return {"error": "MediaPipe not available - hand detection disabled"}
-        
-        print(f'[DEBUG] Calling detect_hand_bbox')
-        bbox = detect_hand_bbox(rgb, hands, w0, h0, padding=HAND_PADDING)
-        print(f'[DEBUG] Hand detection result: {bbox}')
+            print(f'[WARN] MediaPipe hands is None - using center crop fallback')
+            # Use center crop as fallback
+            size = min(w0, h0)
+            x1 = (w0 - size) // 2
+            y1 = (h0 - size) // 2
+            bbox = (x1, y1, x1 + size, y1 + size)
+            print(f'[DEBUG] Using center crop fallback: {bbox}')
+        else:
+            print(f'[DEBUG] Calling detect_hand_bbox')
+            bbox = detect_hand_bbox(rgb, hands, w0, h0, padding=HAND_PADDING)
+            print(f'[DEBUG] Hand detection result: {bbox}')
         
         if bbox:
             x1, y1, x2, y2 = bbox
