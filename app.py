@@ -13,19 +13,6 @@ from flask import Flask, request, jsonify, render_template_string
 
 try:
     import tensorflow as tf
-    # Try to import TensorFlow submodules (suppress linting warnings)
-    try:
-        from tensorflow.keras import layers, models  # type: ignore
-        from tensorflow.keras.layers import InputLayer  # type: ignore
-        import tensorflow.keras.utils as utils  # type: ignore
-    except ImportError as e:
-        print(f'[WARNING] Some TensorFlow submodules not available: {e}')
-        print('[INFO] Will try to import them dynamically when needed')
-        # Define fallbacks for missing imports
-        layers = None
-        models = None
-        InputLayer = None
-        utils = None
 except ImportError:
     print('[ERROR] TensorFlow not installed. Install: pip install tensorflow')
     sys.exit(1)
@@ -120,8 +107,13 @@ def initialize_app():
         print(f'[INFO] Files in current directory: {os.listdir(".")}')
         return False
     
-    # GPU setup for deployment (safer error handling)
+    # Memory and performance optimization for deployment
     print(f'[INFO] Setting up TensorFlow...')
+    
+    # Optimize TensorFlow for deployment
+    tf.config.threading.set_intra_op_parallelism_threads(2)  # Limit CPU threads
+    tf.config.threading.set_inter_op_parallelism_threads(2)
+    
     if ENABLE_GPU_MEMORY_GROWTH:
         try:
             gpus = tf.config.list_physical_devices('GPU')
@@ -130,87 +122,26 @@ def initialize_app():
             if gpus:
                 print(f'[INFO] Enabled GPU memory growth for {len(gpus)} GPU(s)')
             else:
-                print(f'[INFO] No GPUs found, using CPU')
+                print(f'[INFO] No GPUs found, using CPU - optimized for deployment')
         except Exception as e:
             print(f'[INFO] Running on CPU (GPU setup failed): {e}')
+    
+    # Force garbage collection before loading model
+    import gc
+    gc.collect()
 
     print(f'[INFO] Loading model {MODEL_PATH}')
     try:
         # Add more verbose loading
         print(f'[INFO] Model file size: {os.path.getsize(MODEL_PATH)} bytes')
-        
-        # Try loading with different options for deployment
-        print(f'[INFO] Attempting to load model with compile=False...')
-        
-        # Fix for TensorFlow version compatibility
-        custom_objects = {}
-        
-        # Try multiple loading approaches for compatibility
-        try:
-            # First attempt: safe_mode=False for TensorFlow 2.15+
-            model = tf.keras.models.load_model(MODEL_PATH, compile=False, safe_mode=False)
-            print(f'[INFO] Model loaded successfully with safe_mode=False!')
-        except Exception as e1:
-            print(f'[INFO] First attempt failed: {e1}')
-            print(f'[INFO] Trying with custom objects...')
-            try:
-                # Handle compatibility issues with InputLayer
-                
-                # Create custom objects to handle batch_shape parameter differences
-                def create_input_layer(*args, **kwargs):
-                    # Convert batch_shape to input_shape for compatibility
-                    if 'batch_shape' in kwargs:
-                        batch_shape = kwargs.pop('batch_shape')
-                        if batch_shape is not None and len(batch_shape) > 1:
-                            kwargs['input_shape'] = batch_shape[1:]
-                    return InputLayer(*args, **kwargs)
-                
-                custom_objects = {'InputLayer': create_input_layer}
-                model = tf.keras.models.load_model(MODEL_PATH, compile=False, custom_objects=custom_objects)
-                print(f'[INFO] Model loaded successfully with custom InputLayer!')
-            except Exception as e2:
-                print(f'[INFO] Second attempt failed: {e2}')
-                print(f'[INFO] Trying basic load...')
-                try:
-                    model = tf.keras.models.load_model(MODEL_PATH, compile=False)
-                    print(f'[INFO] Model loaded with compile=False!')
-                except Exception as e3:
-                    print(f'[INFO] All loading attempts failed, trying manual reconstruction...')
-                    # Last resort: create model architecture and try to load weights
-                    model = models.Sequential([
-                        layers.InputLayer(input_shape=(28, 28, 1)),
-                        layers.Conv2D(32, (3, 3), activation='relu'),
-                        layers.MaxPooling2D((2, 2)),
-                        layers.Conv2D(64, (3, 3), activation='relu'),
-                        layers.MaxPooling2D((2, 2)),
-                        layers.Conv2D(64, (3, 3), activation='relu'),
-                        layers.Flatten(),
-                        layers.Dense(64, activation='relu'),
-                        layers.Dense(24, activation='softmax')
-                    ])
-                    print(f'[INFO] Created model architecture manually')
-                    # Note: This won't have trained weights, but allows testing
-        
-        # Verify model is functional
-        print(f'[INFO] Testing model inference...')
-        test_input = np.zeros((1, 28, 28, 1), dtype=np.float32)
-        test_output = model.predict(test_input, verbose=0)
-        print(f'[INFO] Model inference test successful! Output shape: {test_output.shape}')
-        
+        model = tf.keras.models.load_model(MODEL_PATH, compile=False)
+        print(f'[INFO] Model loaded successfully!')
     except Exception as e:
         print(f'[ERROR] Failed to load model: {e}')
         print(f'[ERROR] Exception type: {type(e)}')
         import traceback
         traceback.print_exc()
-        
-        # Try alternative loading methods
-        try:
-            print(f'[INFO] Trying alternative loading method...')
-            model = tf.keras.models.load_model(MODEL_PATH)
-            print(f'[INFO] Alternative loading successful!')
-        except Exception as e2:
-            print(f'[ERROR] Alternative loading also failed: {e2}')
-            return False
+        return False
         
     try:
         in_shape = model.inputs[0].shape
@@ -239,42 +170,33 @@ def initialize_app():
             mp_hands = mp.solutions.hands
             print(f'[INFO] Creating MediaPipe Hands instance...')
             
-            # Try with minimal configuration first
+            # Add environment variable for headless deployment
+            os.environ['MEDIAPIPE_DISABLE_GPU'] = '1'
+            
             hands = mp_hands.Hands(
                 static_image_mode=False, 
                 max_num_hands=1,
                 min_detection_confidence=0.5, 
                 min_tracking_confidence=0.5,
-                model_complexity=0  # Use lightest model
+                model_complexity=0  # Use lighter model for deployment
             )
-            
-            # Test MediaPipe with a dummy image
-            print(f'[INFO] Testing MediaPipe with dummy image...')
-            test_image = np.zeros((480, 640, 3), dtype=np.uint8)
-            results = hands.process(test_image)
-            print(f'[INFO] MediaPipe test successful!')
-            
             print('[INFO] MediaPipe enabled successfully!')
-            return True
             
+            # Test MediaPipe with dummy data to ensure it works
+            dummy_rgb = np.zeros((100, 100, 3), dtype=np.uint8)
+            test_result = hands.process(dummy_rgb)
+            print(f'[INFO] MediaPipe test successful - result: {test_result is not None}')
+            
+            return True
         except Exception as e:
             print(f'[ERROR] MediaPipe initialization failed: {e}')
             print(f'[ERROR] Exception type: {type(e)}')
             import traceback
             traceback.print_exc()
-            
-            # Try with even simpler configuration
-            try:
-                print(f'[INFO] Trying simplified MediaPipe configuration...')
-                hands = mp_hands.Hands(max_num_hands=1, model_complexity=0)
-                print(f'[INFO] Simplified MediaPipe successful!')
-                return True
-            except Exception as e2:
-                print(f'[ERROR] Simplified MediaPipe also failed: {e2}')
-                # Continue without MediaPipe
-                print('[WARN] Continuing without MediaPipe - hand detection disabled')
-                hands = None
-                return True
+            # Don't fail completely - try to continue without MediaPipe
+            print('[WARN] Continuing without MediaPipe - hand detection disabled')
+            hands = None
+            return True
     else:
         print('[ERROR] MediaPipe not available - hand detection disabled')
         hands = None
@@ -283,18 +205,24 @@ def initialize_app():
 def predict_from_image(image_data):
     """Process image exactly like opencv_demo.py"""
     try:
+        print(f'[DEBUG] predict_from_image called')
+        
         # Decode base64 image
         if 'data:image' in image_data:
             image_data = image_data.split(',')[1]
         
+        print(f'[DEBUG] Decoding base64 image (length after split: {len(image_data)})')
         image_bytes = base64.b64decode(image_data)
         image = Image.open(BytesIO(image_bytes))
         frame = np.array(image)
+        
+        print(f'[DEBUG] Image decoded - shape: {frame.shape}, dtype: {frame.dtype}')
         
         # Convert RGB to BGR for OpenCV (same as opencv_demo.py)
         if len(frame.shape) == 3 and frame.shape[2] == 3:
             frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
         else:
+            print(f'[ERROR] Invalid image format - shape: {frame.shape}')
             return {"error": "Invalid image format"}
         
         # Mirror the frame (same as opencv_demo.py with DEFAULT_MIRROR=True)
@@ -302,30 +230,45 @@ def predict_from_image(image_data):
             frame = cv2.flip(frame, 1)
         
         h0, w0 = frame.shape[:2]
+        print(f'[DEBUG] Frame dimensions: {w0}x{h0}')
         
         # Convert to RGB for MediaPipe (same as opencv_demo.py)
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         
         # Check if MediaPipe is available
         if hands is None:
+            print(f'[ERROR] MediaPipe hands is None')
             return {"error": "MediaPipe not available - hand detection disabled"}
         
+        print(f'[DEBUG] Calling detect_hand_bbox')
         bbox = detect_hand_bbox(rgb, hands, w0, h0, padding=HAND_PADDING)
+        print(f'[DEBUG] Hand detection result: {bbox}')
         
         if bbox:
             x1, y1, x2, y2 = bbox
             x1 = max(0, x1); y1 = max(0, y1); x2 = min(w0, x2); y2 = min(h0, y2)
             
+            print(f'[DEBUG] Bounding box: ({x1}, {y1}, {x2}, {y2})')
+            
             if x2 > x1 and y2 > y1:
                 # Extract ROI and preprocess (exact same as opencv_demo.py)
                 roi = frame[y1:y2, x1:x2]
+                print(f'[DEBUG] ROI extracted - shape: {roi.shape}')
+                
                 proc = preprocess_roi(roi, target_size, 1, grayscale=True)
+                print(f'[DEBUG] ROI preprocessed - shape: {proc.shape}, target_size: {target_size}')
+                
                 batch = np.expand_dims(proc, 0)
+                print(f'[DEBUG] Batch created - shape: {batch.shape}')
                 
                 # Predict (same as opencv_demo.py)
+                print(f'[DEBUG] Running model prediction...')
                 probs = model.predict(batch, verbose=0)[0]
+                print(f'[DEBUG] Model prediction complete - probs shape: {probs.shape}')
+                
                 pred_idx = int(np.argmax(probs))
                 confidence = float(probs[pred_idx])
+                print(f'[DEBUG] Top prediction: index={pred_idx}, confidence={confidence:.3f}')
                 
                 # Get top 3 predictions
                 top3_indices = np.argsort(probs)[-3:][::-1]
@@ -751,11 +694,16 @@ HTML_TEMPLATE = '''
                     timeout: 5000
                 });
                 
+                console.log('Predict response status:', response.status);
+                
                 if (!response.ok) {
-                    throw new Error(`Server error: ${response.status}`);
+                    const errorText = await response.text();
+                    console.error('Server error response:', errorText);
+                    throw new Error(`Server error: ${response.status} - ${errorText}`);
                 }
                 
                 const data = await response.json();
+                console.log('Predict response data:', data);
                 
                 retryCount = 0; // Reset on success
                 
@@ -879,11 +827,31 @@ HTML_TEMPLATE = '''
         
         async function testBackend() {
             try {
-                const response = await fetch('/health');
-                const data = await response.json();
-                document.getElementById('backend-info').innerHTML = `✅ Backend OK - Model: ${data.model_loaded ? '✅' : '❌'} MediaPipe: ${data.mediapipe_loaded ? '✅' : '❌'}`;
+                // Test health endpoint
+                const healthResponse = await fetch('/health');
+                const healthData = await healthResponse.json();
+                
+                // Test model endpoint
+                const modelResponse = await fetch('/test-model');
+                const modelData = await modelResponse.json();
+                
+                let status = `✅ Backend OK - Model: ${healthData.model_loaded ? '✅' : '❌'} MediaPipe: ${healthData.mediapipe_loaded ? '✅' : '❌'}`;
+                
+                if (modelData.success) {
+                    status += ` ModelTest: ✅`;
+                } else {
+                    status += ` ModelTest: ❌`;
+                }
+                
+                document.getElementById('backend-info').innerHTML = status;
+                
+                // Log detailed info to console
+                console.log('Health check:', healthData);
+                console.log('Model test:', modelData);
+                
             } catch (error) {
                 document.getElementById('backend-info').textContent = `❌ Backend Error: ${error.message}`;
+                console.error('Backend test error:', error);
             }
         }
         
@@ -927,84 +895,39 @@ def index():
 @app.route('/predict', methods=['POST'])
 def predict():
     try:
+        print(f'[DEBUG] /predict endpoint called')
+        
+        # Check if we have the required components initialized
+        if model is None:
+            print(f'[ERROR] Model not loaded!')
+            return jsonify({"error": "Model not initialized"}), 500
+        
+        if hands is None and MP_AVAILABLE:
+            print(f'[ERROR] MediaPipe hands not initialized!')
+            return jsonify({"error": "MediaPipe not initialized"}), 500
+        
         data = request.get_json()
+        if data is None:
+            print(f'[ERROR] No JSON data received')
+            return jsonify({"error": "No JSON data received"}), 400
+            
         image_data = data.get('image', '')
         
         if not image_data:
+            print(f'[ERROR] No image data in request')
             return jsonify({"error": "No image data provided"}), 400
         
+        print(f'[DEBUG] Processing image data (length: {len(image_data)})')
         result = predict_from_image(image_data)
+        print(f'[DEBUG] Prediction result: {result}')
         return jsonify(result)
         
     except Exception as e:
+        print(f'[ERROR] Prediction endpoint error: {str(e)}')
+        print(f'[ERROR] Exception type: {type(e)}')
+        import traceback
+        traceback.print_exc()
         return jsonify({"error": f"Server error: {str(e)}"}), 500
-
-@app.route('/debug-init')
-def debug_init():
-    """Debug endpoint to test initialization components separately"""
-    result = {
-        "tensorflow_version": tf.__version__,
-        "model_path_exists": os.path.exists(MODEL_PATH),
-        "current_directory": os.getcwd(),
-        "files_in_directory": os.listdir("."),
-        "mediapipe_available": MP_AVAILABLE,
-        "model_test": "not_tested",
-        "mediapipe_test": "not_tested"
-    }
-    
-    # Test model loading separately
-    try:
-        if os.path.exists(MODEL_PATH):
-            # Try multiple approaches for TensorFlow compatibility
-            try:
-                test_model = tf.keras.models.load_model(MODEL_PATH, compile=False, safe_mode=False)
-                result["model_test"] = "success with safe_mode=False"
-            except Exception as e1:
-                try:
-                    # Handle compatibility issues with InputLayer
-                    
-                    def create_input_layer(*args, **kwargs):
-                        if 'batch_shape' in kwargs:
-                            batch_shape = kwargs.pop('batch_shape')
-                            if batch_shape is not None and len(batch_shape) > 1:
-                                kwargs['input_shape'] = batch_shape[1:]
-                        return InputLayer(*args, **kwargs)
-                    
-                    custom_objects = {'InputLayer': create_input_layer}
-                    test_model = tf.keras.models.load_model(MODEL_PATH, compile=False, custom_objects=custom_objects)
-                    result["model_test"] = "success with custom InputLayer"
-                except Exception as e2:
-                    try:
-                        test_model = tf.keras.models.load_model(MODEL_PATH, compile=False)
-                        result["model_test"] = "success with compile=False"
-                    except Exception as e3:
-                        result["model_test"] = f"all_failed: {str(e3)}"
-                        return jsonify(result)
-            
-            test_input = np.zeros((1, 28, 28, 1), dtype=np.float32)
-            test_output = test_model.predict(test_input, verbose=0)
-            result["model_test"] += f" - output shape: {test_output.shape}"
-            del test_model  # Free memory
-        else:
-            result["model_test"] = "file_not_found"
-    except Exception as e:
-        result["model_test"] = f"error: {str(e)}"
-    
-    # Test MediaPipe separately
-    try:
-        if MP_AVAILABLE:
-            mp_hands_test = mp.solutions.hands
-            hands_test = mp_hands_test.Hands(max_num_hands=1, model_complexity=0)
-            test_image = np.zeros((100, 100, 3), dtype=np.uint8)
-            test_results = hands_test.process(test_image)
-            result["mediapipe_test"] = "success"
-            hands_test.close()  # Clean up
-        else:
-            result["mediapipe_test"] = "not_available"
-    except Exception as e:
-        result["mediapipe_test"] = f"error: {str(e)}"
-    
-    return jsonify(result)
 
 @app.route('/health')
 def health():
@@ -1018,8 +941,42 @@ def health():
         "model_path_exists": os.path.exists(MODEL_PATH),
         "current_directory": os.getcwd(),
         "python_version": sys.version,
-        "tensorflow_version": tf.__version__
+        "tensorflow_version": tf.__version__,
+        "model_input_shape": str(model.inputs[0].shape) if model else None,
+        "model_output_shape": str(model.outputs[0].shape) if model else None,
+        "target_size": target_size,
+        "labels_count": len(labels) if labels else 0
     })
+
+@app.route('/test-model', methods=['GET'])
+def test_model():
+    """Test endpoint to verify model works with dummy data"""
+    try:
+        if model is None:
+            return jsonify({"error": "Model not loaded"}), 500
+        
+        # Create a dummy input matching the expected shape
+        dummy_input = np.random.rand(1, target_size, target_size, 1).astype('float32')
+        print(f'[DEBUG] Testing model with dummy input shape: {dummy_input.shape}')
+        
+        # Run prediction
+        probs = model.predict(dummy_input, verbose=0)[0]
+        pred_idx = int(np.argmax(probs))
+        confidence = float(probs[pred_idx])
+        
+        return jsonify({
+            "success": True,
+            "dummy_prediction": labels[pred_idx] if pred_idx < len(labels) else str(pred_idx),
+            "confidence": confidence,
+            "probs_shape": probs.shape,
+            "message": "Model is working correctly"
+        })
+        
+    except Exception as e:
+        print(f'[ERROR] Model test failed: {str(e)}')
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": f"Model test failed: {str(e)}"}), 500
 
 @app.route('/api/info')
 def api_info():
@@ -1031,6 +988,55 @@ def api_info():
         "model_accuracy": "83%+",
         "real_time": True
     })
+
+@app.route('/debug-deployment')
+def debug_deployment():
+    """Comprehensive deployment debugging endpoint"""
+    import psutil
+    import sys
+    
+    try:
+        # Memory info
+        memory = psutil.virtual_memory()
+        
+        # Disk space
+        disk = psutil.disk_usage('/')
+        
+        debug_info = {
+            "deployment_status": "✅ App is running",
+            "model_initialized": model is not None,
+            "mediapipe_initialized": hands is not None,
+            "mediapipe_available": MP_AVAILABLE,
+            "system_info": {
+                "python_version": sys.version,
+                "memory_total_gb": round(memory.total / (1024**3), 2),
+                "memory_available_gb": round(memory.available / (1024**3), 2),
+                "memory_percent_used": memory.percent,
+                "disk_free_gb": round(disk.free / (1024**3), 2)
+            },
+            "model_info": {
+                "model_loaded": model is not None,
+                "model_path_exists": os.path.exists(MODEL_PATH),
+                "target_size": target_size if model else None,
+                "labels_count": len(labels) if labels else 0,
+                "tensorflow_version": tf.__version__
+            },
+            "environment": {
+                "is_render": bool(os.environ.get('RENDER')),
+                "is_heroku": bool(os.environ.get('HEROKU_APP_NAME')),
+                "port": os.environ.get('PORT', 'Not set'),
+                "current_dir": os.getcwd(),
+                "files_in_dir": os.listdir('.') if os.path.exists('.') else []
+            }
+        }
+        
+        return jsonify(debug_info)
+        
+    except Exception as e:
+        return jsonify({
+            "error": f"Debug endpoint failed: {str(e)}",
+            "basic_status": "App is running but debug failed"
+        }), 500
 
 # Error handlers for deployment
 @app.errorhandler(404)
@@ -1054,11 +1060,13 @@ if __name__ == '__main__':
         port = int(os.environ.get('PORT', 5000))
         
         # Check if running in production or development
-        is_production = os.environ.get('RENDER') or os.environ.get('HEROKU_APP_NAME')
+        is_production = os.environ.get('RENDER') or os.environ.get('HEROKU_APP_NAME') or os.environ.get('RAILWAY_ENVIRONMENT')
         
         if is_production:
             print("🌐 Running in PRODUCTION mode")
-            app.run(debug=False, host='0.0.0.0', port=port)
+            print("🔧 Production settings: Limited workers, optimized memory")
+            # Don't run app.run() in production - gunicorn will handle it
+            print("✅ App initialized - waiting for gunicorn...")
         else:
             print("💻 Running in DEVELOPMENT mode")
             app.run(debug=True, host='0.0.0.0', port=port)
