@@ -1,6 +1,7 @@
 import os
 import sys
 import base64
+import gc  # For garbage collection
 from io import BytesIO
 import numpy as np
 from PIL import Image
@@ -11,6 +12,21 @@ from flask import Flask, request, jsonify, render_template_string
 try:
     import tensorflow as tf
     print(f"[INFO] TensorFlow version: {tf.__version__}")
+    
+    # Configure TensorFlow for minimal memory usage
+    try:
+        # Force CPU usage for memory efficiency on Render
+        tf.config.set_visible_devices([], 'GPU')
+        
+        # Limit parallelism to reduce memory overhead
+        tf.config.threading.set_inter_op_parallelism_threads(1)
+        tf.config.threading.set_intra_op_parallelism_threads(1)
+        
+        print("[INFO] TensorFlow memory optimization applied")
+        
+    except Exception as e:
+        print(f"[WARN] TensorFlow optimization failed: {e}")
+        
 except ImportError:
     print('[ERROR] TensorFlow not installed')
     sys.exit(1)
@@ -27,11 +43,12 @@ except ImportError:
 # Configuration
 MODEL_PATH = 'cnn_sign_language_model.h5'
 MIN_CONFIDENCE = 0.5
-HAND_PADDING = 0.38
+HAND_PADDING = 0.15  # Reduced for less processing
 ASL_LABELS = ['A','B','C','D','E','F','G','H','I','K','L','M','N','O','P','Q','R','S','T','U','V','W','X','Y']
 
-# Disable TensorFlow warnings
-os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
+# Disable TensorFlow warnings and optimize for deployment
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'  # Suppress more logs
+os.environ['TF_FORCE_GPU_ALLOW_GROWTH'] = 'true'
 tf.get_logger().setLevel('ERROR')
 
 # Global variables
@@ -103,7 +120,7 @@ def load_model_safe():
         return False
 
 def setup_mediapipe():
-    """Setup MediaPipe hands detection"""
+    """Setup MediaPipe hands detection with memory optimization"""
     global hands
     
     if not MP_AVAILABLE:
@@ -111,21 +128,17 @@ def setup_mediapipe():
         return True
     
     try:
-        # Environment setup for headless servers
+        # Environment setup for headless servers and memory optimization
         os.environ['MEDIAPIPE_DISABLE_GPU'] = '1'
         
         mp_hands = mp.solutions.hands
         hands = mp_hands.Hands(
             static_image_mode=False,
             max_num_hands=1,
-            min_detection_confidence=0.5,
+            min_detection_confidence=0.7,  # Higher threshold for efficiency
             min_tracking_confidence=0.5,
-            model_complexity=0
+            model_complexity=0  # Lightest model
         )
-        
-        # Test MediaPipe
-        test_image = np.zeros((100, 100, 3), dtype=np.uint8)
-        test_result = hands.process(test_image)
         
         print("[INFO] ✅ MediaPipe initialized successfully!")
         return True
@@ -200,7 +213,7 @@ def preprocess_image(image_region):
     return batch
 
 def predict_sign(image_data):
-    """Main prediction function"""
+    """Main prediction function with memory optimization"""
     try:
         # Decode base64 image
         if 'data:image' in image_data:
@@ -209,6 +222,9 @@ def predict_sign(image_data):
         image_bytes = base64.b64decode(image_data)
         pil_image = Image.open(BytesIO(image_bytes))
         image = np.array(pil_image)
+        
+        # Clean up immediately
+        del image_bytes, pil_image
         
         # Convert RGB to BGR for OpenCV
         if len(image.shape) == 3 and image.shape[2] == 3:
@@ -236,13 +252,22 @@ def predict_sign(image_data):
         if roi.size == 0:
             return {"error": "Empty hand region"}
         
+        # Clean up large image array
+        del image
+        
         # Preprocess for model
         processed = preprocess_image(roi)
         
-        # Predict
-        predictions = model.predict(processed, verbose=0)[0]
+        # Clean up ROI
+        del roi
         
-        # Get results
+        # Predict with minimal memory usage
+        predictions = model.predict(processed, batch_size=1, verbose=0)[0]
+        
+        # Clean up processed array immediately
+        del processed
+        
+        # Get results efficiently
         pred_idx = np.argmax(predictions)
         confidence = float(predictions[pred_idx])
         predicted_letter = ASL_LABELS[pred_idx] if pred_idx < len(ASL_LABELS) else f"Class_{pred_idx}"
@@ -256,6 +281,12 @@ def predict_sign(image_data):
             }
             for i in top3_indices
         ]
+        
+        # Clean up prediction arrays
+        del predictions, top3_indices
+        
+        # Force garbage collection to free memory
+        gc.collect()
         
         return {
             "success": True,
