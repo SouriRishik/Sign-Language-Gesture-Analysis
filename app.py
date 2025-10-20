@@ -141,7 +141,65 @@ def initialize_app():
         
         # Load with memory optimization
         print(f'[INFO] Loading model with memory optimization...')
-        model = tf.keras.models.load_model(MODEL_PATH, compile=False)
+        
+        # Try multiple loading approaches for compatibility
+        model = None
+        loading_attempts = [
+            "Normal loading",
+            "Safe mode (no compile)",
+            "Custom objects",
+            "Weights only"
+        ]
+        
+        for i, attempt in enumerate(loading_attempts):
+            try:
+                print(f'[INFO] Attempt {i+1}: {attempt}')
+                
+                if i == 0:
+                    # Normal loading
+                    model = tf.keras.models.load_model(MODEL_PATH, compile=False)
+                elif i == 1:
+                    # Safe mode
+                    model = tf.keras.models.load_model(MODEL_PATH, compile=False, safe_mode=False)
+                elif i == 2:
+                    # With custom objects
+                    model = tf.keras.models.load_model(
+                        MODEL_PATH, 
+                        compile=False,
+                        custom_objects={'InputLayer': tf.keras.layers.InputLayer}
+                    )
+                elif i == 3:
+                    # Reconstruct model and load weights
+                    print(f'[INFO] Reconstructing model architecture...')
+                    model = tf.keras.Sequential([
+                        tf.keras.layers.Conv2D(32, (3, 3), activation='relu', input_shape=(28, 28, 1)),
+                        tf.keras.layers.MaxPooling2D((2, 2)),
+                        tf.keras.layers.Conv2D(64, (3, 3), activation='relu'),
+                        tf.keras.layers.MaxPooling2D((2, 2)),
+                        tf.keras.layers.Conv2D(64, (3, 3), activation='relu'),
+                        tf.keras.layers.Flatten(),
+                        tf.keras.layers.Dense(64, activation='relu'),
+                        tf.keras.layers.Dropout(0.5),
+                        tf.keras.layers.Dense(24, activation='softmax')
+                    ])
+                    # Try to load weights (this might not work with .h5 full model)
+                    try:
+                        model.load_weights(MODEL_PATH)
+                    except:
+                        # Skip this attempt
+                        continue
+                
+                if model is not None:
+                    print(f'[INFO] Model loaded successfully using {attempt}!')
+                    break
+                    
+            except Exception as e:
+                print(f'[WARN] {attempt} failed: {str(e)[:100]}...')
+                model = None
+                continue
+        
+        if model is None:
+            raise Exception("All model loading attempts failed")
         
         # Optimize model for inference only
         model.trainable = False
