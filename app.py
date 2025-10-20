@@ -438,6 +438,19 @@ HTML_TEMPLATE = '''
         <h1>🤟 ASL Recognition</h1>
         <div class="subtitle">Real-time American Sign Language detection - Accessible anywhere!</div>
         
+        <!-- Debug Section -->
+        <div style="background: rgba(255,255,255,0.2); padding: 15px; border-radius: 10px; margin-bottom: 20px;">
+            <h3>🔧 Debug Info</h3>
+            <div id="debug-info">
+                <p>📍 <strong>Location:</strong> <span id="location-info">Checking...</span></p>
+                <p>🔒 <strong>HTTPS:</strong> <span id="https-info">Checking...</span></p>
+                <p>📷 <strong>Camera API:</strong> <span id="camera-api-info">Checking...</span></p>
+                <p>🤖 <strong>Backend:</strong> <span id="backend-info">Checking...</span></p>
+                <button onclick="testBackend()" style="background: #28a745; border: none; color: white; padding: 10px 20px; border-radius: 5px; cursor: pointer; margin: 10px 5px;">Test Backend</button>
+                <button onclick="testCamera()" style="background: #007bff; border: none; color: white; padding: 10px 20px; border-radius: 5px; cursor: pointer; margin: 10px 5px;">Test Camera</button>
+            </div>
+        </div>
+        
         <div class="main-content">
             <div class="camera-section">
                 <div class="video-container">
@@ -497,7 +510,6 @@ HTML_TEMPLATE = '''
         async function initCamera() {
             try {
                 updateStatus('🔄 Requesting camera access...');
-                console.log('Attempting to access camera...');
                 
                 const constraints = { 
                     video: { 
@@ -507,19 +519,12 @@ HTML_TEMPLATE = '''
                     } 
                 };
                 
-                // Check if getUserMedia is available
-                if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-                    throw new Error('Camera API not supported in this browser');
-                }
-                
                 const stream = await navigator.mediaDevices.getUserMedia(constraints);
                 video.srcObject = stream;
-                console.log('Camera stream obtained successfully');
                 
                 video.addEventListener('loadedmetadata', () => {
                     canvas.width = video.videoWidth;
                     canvas.height = video.videoHeight;
-                    console.log(`Video dimensions: ${video.videoWidth}x${video.videoHeight}`);
                     
                     const updateOverlay = () => {
                         overlay.width = video.offsetWidth;
@@ -539,22 +544,17 @@ HTML_TEMPLATE = '''
                 
             } catch (err) {
                 console.error('Camera error:', err);
-                let errorMessage = 'Camera access issue: ';
+                let errorMessage = 'Camera access denied. ';
                 
                 if (err.name === 'NotAllowedError') {
                     errorMessage += 'Please allow camera access and refresh the page.';
                 } else if (err.name === 'NotFoundError') {
                     errorMessage += 'No camera found on this device.';
-                } else if (err.name === 'NotSupportedError') {
-                    errorMessage += 'Camera not supported on this device.';
-                } else if (err.message.includes('Camera API not supported')) {
-                    errorMessage += 'This browser does not support camera access. Try Chrome or Firefox.';
                 } else {
-                    errorMessage += `${err.message}. Please check camera permissions and refresh.`;
+                    errorMessage += 'Please check camera permissions and refresh.';
                 }
                 
                 showError(errorMessage);
-                updateStatus('❌ Camera access failed');
             }
         }
         
@@ -599,10 +599,8 @@ HTML_TEMPLATE = '''
             if (!predictionActive) return;
             
             try {
-                console.log('Starting prediction...');
                 ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
                 const imageData = canvas.toDataURL('image/jpeg', 0.7);
-                console.log('Image captured, sending to server...');
                 
                 const response = await fetch('/predict', {
                     method: 'POST',
@@ -618,16 +616,13 @@ HTML_TEMPLATE = '''
                 }
                 
                 const data = await response.json();
-                console.log('Prediction response:', data);
                 
                 retryCount = 0; // Reset on success
                 
                 if (data.error) {
-                    console.log('No hand detected:', data.error);
                     showNoHand();
                     updateStatus('🤖 AI ready - Show your hand');
                 } else if (data.success) {
-                    console.log('Prediction successful:', data.prediction);
                     displayRealtimeResult(data);
                     updateStatus('🎯 Live recognition active');
                 }
@@ -721,7 +716,47 @@ HTML_TEMPLATE = '''
         }
         
         // Initialize on page load
-        document.addEventListener('DOMContentLoaded', initCamera);
+        document.addEventListener('DOMContentLoaded', () => {
+            initDebugInfo();
+            initCamera();
+        });
+        
+        // Debug functions
+        function initDebugInfo() {
+            // Check location
+            document.getElementById('location-info').textContent = window.location.href;
+            
+            // Check HTTPS
+            document.getElementById('https-info').textContent = window.location.protocol === 'https:' ? '✅ Secure' : '❌ Not Secure (HTTP)';
+            
+            // Check Camera API
+            if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+                document.getElementById('camera-api-info').textContent = '✅ Supported';
+            } else {
+                document.getElementById('camera-api-info').textContent = '❌ Not Supported';
+            }
+        }
+        
+        async function testBackend() {
+            try {
+                const response = await fetch('/health');
+                const data = await response.json();
+                document.getElementById('backend-info').innerHTML = `✅ Backend OK - Model: ${data.model_loaded ? '✅' : '❌'} MediaPipe: ${data.mediapipe_loaded ? '✅' : '❌'}`;
+            } catch (error) {
+                document.getElementById('backend-info').textContent = `❌ Backend Error: ${error.message}`;
+            }
+        }
+        
+        async function testCamera() {
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+                document.getElementById('camera-api-info').textContent = '✅ Camera Access Granted';
+                // Stop the stream
+                stream.getTracks().forEach(track => track.stop());
+            } catch (error) {
+                document.getElementById('camera-api-info').textContent = `❌ Camera Error: ${error.name}`;
+            }
+        }
         
         // Handle page visibility changes
         document.addEventListener('visibilitychange', () => {
@@ -774,40 +809,6 @@ def health():
         "using_opencv_demo_logic": True
     })
 
-@app.route('/test-predict', methods=['GET'])
-def test_predict():
-    """Test endpoint to verify prediction pipeline"""
-    try:
-        # Create a simple test image (black square)
-        import numpy as np
-        test_image = np.zeros((28, 28, 3), dtype=np.uint8)
-        from PIL import Image
-        import base64
-        from io import BytesIO
-        
-        pil_image = Image.fromarray(test_image)
-        buffer = BytesIO()
-        pil_image.save(buffer, format='JPEG')
-        image_data = base64.b64encode(buffer.getvalue()).decode()
-        
-        # Test the prediction pipeline
-        result = predict_from_image(f"data:image/jpeg;base64,{image_data}")
-        
-        return jsonify({
-            "test_status": "success",
-            "model_loaded": model is not None,
-            "mediapipe_loaded": hands is not None,
-            "prediction_result": result
-        })
-        
-    except Exception as e:
-        return jsonify({
-            "test_status": "error",
-            "error": str(e),
-            "model_loaded": model is not None,
-            "mediapipe_loaded": hands is not None
-        })
-
 @app.route('/api/info')
 def api_info():
     return jsonify({
@@ -839,7 +840,16 @@ if __name__ == '__main__':
         
         # For deployment, use environment port or default to 5000
         port = int(os.environ.get('PORT', 5000))
-        app.run(debug=False, host='0.0.0.0', port=port)
+        
+        # Check if running in production or development
+        is_production = os.environ.get('RENDER') or os.environ.get('HEROKU_APP_NAME')
+        
+        if is_production:
+            print("🌐 Running in PRODUCTION mode")
+            app.run(debug=False, host='0.0.0.0', port=port)
+        else:
+            print("💻 Running in DEVELOPMENT mode")
+            app.run(debug=True, host='0.0.0.0', port=port)
     else:
         print("❌ Failed to initialize. Check model file and dependencies.")
         sys.exit(1)
