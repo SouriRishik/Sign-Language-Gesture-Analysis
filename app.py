@@ -125,14 +125,32 @@ def initialize_app():
     try:
         # Add more verbose loading
         print(f'[INFO] Model file size: {os.path.getsize(MODEL_PATH)} bytes')
+        
+        # Try loading with different options for deployment
+        print(f'[INFO] Attempting to load model with compile=False...')
         model = tf.keras.models.load_model(MODEL_PATH, compile=False)
         print(f'[INFO] Model loaded successfully!')
+        
+        # Verify model is functional
+        print(f'[INFO] Testing model inference...')
+        test_input = np.zeros((1, 28, 28, 1), dtype=np.float32)
+        test_output = model.predict(test_input, verbose=0)
+        print(f'[INFO] Model inference test successful! Output shape: {test_output.shape}')
+        
     except Exception as e:
         print(f'[ERROR] Failed to load model: {e}')
         print(f'[ERROR] Exception type: {type(e)}')
         import traceback
         traceback.print_exc()
-        return False
+        
+        # Try alternative loading methods
+        try:
+            print(f'[INFO] Trying alternative loading method...')
+            model = tf.keras.models.load_model(MODEL_PATH)
+            print(f'[INFO] Alternative loading successful!')
+        except Exception as e2:
+            print(f'[ERROR] Alternative loading also failed: {e2}')
+            return False
         
     try:
         in_shape = model.inputs[0].shape
@@ -160,24 +178,43 @@ def initialize_app():
             print(f'[INFO] Importing MediaPipe solutions...')
             mp_hands = mp.solutions.hands
             print(f'[INFO] Creating MediaPipe Hands instance...')
+            
+            # Try with minimal configuration first
             hands = mp_hands.Hands(
                 static_image_mode=False, 
                 max_num_hands=1,
                 min_detection_confidence=0.5, 
                 min_tracking_confidence=0.5,
-                model_complexity=0  # Use lighter model for deployment
+                model_complexity=0  # Use lightest model
             )
+            
+            # Test MediaPipe with a dummy image
+            print(f'[INFO] Testing MediaPipe with dummy image...')
+            test_image = np.zeros((480, 640, 3), dtype=np.uint8)
+            results = hands.process(test_image)
+            print(f'[INFO] MediaPipe test successful!')
+            
             print('[INFO] MediaPipe enabled successfully!')
             return True
+            
         except Exception as e:
             print(f'[ERROR] MediaPipe initialization failed: {e}')
             print(f'[ERROR] Exception type: {type(e)}')
             import traceback
             traceback.print_exc()
-            # Don't fail completely - try to continue without MediaPipe
-            print('[WARN] Continuing without MediaPipe - hand detection disabled')
-            hands = None
-            return True
+            
+            # Try with even simpler configuration
+            try:
+                print(f'[INFO] Trying simplified MediaPipe configuration...')
+                hands = mp_hands.Hands(max_num_hands=1, model_complexity=0)
+                print(f'[INFO] Simplified MediaPipe successful!')
+                return True
+            except Exception as e2:
+                print(f'[ERROR] Simplified MediaPipe also failed: {e2}')
+                # Continue without MediaPipe
+                print('[WARN] Continuing without MediaPipe - hand detection disabled')
+                hands = None
+                return True
     else:
         print('[ERROR] MediaPipe not available - hand detection disabled')
         hands = None
@@ -841,6 +878,48 @@ def predict():
         
     except Exception as e:
         return jsonify({"error": f"Server error: {str(e)}"}), 500
+
+@app.route('/debug-init')
+def debug_init():
+    """Debug endpoint to test initialization components separately"""
+    result = {
+        "tensorflow_version": tf.__version__,
+        "model_path_exists": os.path.exists(MODEL_PATH),
+        "current_directory": os.getcwd(),
+        "files_in_directory": os.listdir("."),
+        "mediapipe_available": MP_AVAILABLE,
+        "model_test": "not_tested",
+        "mediapipe_test": "not_tested"
+    }
+    
+    # Test model loading separately
+    try:
+        if os.path.exists(MODEL_PATH):
+            test_model = tf.keras.models.load_model(MODEL_PATH, compile=False)
+            test_input = np.zeros((1, 28, 28, 1), dtype=np.float32)
+            test_output = test_model.predict(test_input, verbose=0)
+            result["model_test"] = f"success - output shape: {test_output.shape}"
+            del test_model  # Free memory
+        else:
+            result["model_test"] = "file_not_found"
+    except Exception as e:
+        result["model_test"] = f"error: {str(e)}"
+    
+    # Test MediaPipe separately
+    try:
+        if MP_AVAILABLE:
+            mp_hands_test = mp.solutions.hands
+            hands_test = mp_hands_test.Hands(max_num_hands=1, model_complexity=0)
+            test_image = np.zeros((100, 100, 3), dtype=np.uint8)
+            test_results = hands_test.process(test_image)
+            result["mediapipe_test"] = "success"
+            hands_test.close()  # Clean up
+        else:
+            result["mediapipe_test"] = "not_available"
+    except Exception as e:
+        result["mediapipe_test"] = f"error: {str(e)}"
+    
+    return jsonify(result)
 
 @app.route('/health')
 def health():
