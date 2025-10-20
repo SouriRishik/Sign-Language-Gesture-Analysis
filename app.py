@@ -97,11 +97,18 @@ def initialize_app():
     """Initialize the same way as opencv_demo.py main() - optimized for deployment"""
     global model, hands, mp_hands, target_size, grayscale, labels
     
+    print(f'[INFO] Starting initialization...')
+    print(f'[INFO] Current working directory: {os.getcwd()}')
+    print(f'[INFO] Model path: {MODEL_PATH}')
+    print(f'[INFO] Model file exists: {os.path.exists(MODEL_PATH)}')
+    
     if not os.path.exists(MODEL_PATH):
         print(f'[ERROR] Model file not found: {MODEL_PATH}')
+        print(f'[INFO] Files in current directory: {os.listdir(".")}')
         return False
     
     # GPU setup for deployment (safer error handling)
+    print(f'[INFO] Setting up TensorFlow...')
     if ENABLE_GPU_MEMORY_GROWTH:
         try:
             gpus = tf.config.list_physical_devices('GPU')
@@ -109,41 +116,72 @@ def initialize_app():
                 tf.config.experimental.set_memory_growth(g, True)
             if gpus:
                 print(f'[INFO] Enabled GPU memory growth for {len(gpus)} GPU(s)')
+            else:
+                print(f'[INFO] No GPUs found, using CPU')
         except Exception as e:
-            print(f'[INFO] Running on CPU (GPU not available): {e}')
+            print(f'[INFO] Running on CPU (GPU setup failed): {e}')
 
     print(f'[INFO] Loading model {MODEL_PATH}')
     try:
-        model = tf.keras.models.load_model(MODEL_PATH)
+        # Add more verbose loading
+        print(f'[INFO] Model file size: {os.path.getsize(MODEL_PATH)} bytes')
+        model = tf.keras.models.load_model(MODEL_PATH, compile=False)
+        print(f'[INFO] Model loaded successfully!')
     except Exception as e:
         print(f'[ERROR] Failed to load model: {e}')
+        print(f'[ERROR] Exception type: {type(e)}')
+        import traceback
+        traceback.print_exc()
         return False
         
-    in_shape = model.inputs[0].shape
-    if len(in_shape) != 4:
-        print('[ERROR] Unexpected input shape:', in_shape)
+    try:
+        in_shape = model.inputs[0].shape
+        print(f'[INFO] Model input shape: {in_shape}')
+        if len(in_shape) != 4:
+            print('[ERROR] Unexpected input shape:', in_shape)
+            return False
+        
+        _, H, W, C = in_shape
+        target_size = int(min(H, W))
+        grayscale = (int(C) == 1)
+        num_classes = int(model.outputs[0].shape[-1])
+        labels = load_labels(num_classes)
+        print(f'[INFO] Model setup complete - Classes: {num_classes}, Target size: {target_size}, Grayscale: {grayscale}')
+    except Exception as e:
+        print(f'[ERROR] Model configuration failed: {e}')
         return False
-    
-    _, H, W, C = in_shape
-    target_size = int(min(H, W))
-    grayscale = (int(C) == 1)
-    num_classes = int(model.outputs[0].shape[-1])
-    labels = load_labels(num_classes)
-    print(f'[INFO] Classes: {num_classes} -> {labels}')
 
+    # MediaPipe initialization with better error handling
+    print(f'[INFO] Setting up MediaPipe...')
+    print(f'[INFO] MediaPipe available: {MP_AVAILABLE}')
+    
     if MP_AVAILABLE:
         try:
+            print(f'[INFO] Importing MediaPipe solutions...')
             mp_hands = mp.solutions.hands
-            hands = mp_hands.Hands(static_image_mode=False, max_num_hands=1,
-                                   min_detection_confidence=0.5, min_tracking_confidence=0.5)
-            print('[INFO] MediaPipe enabled')
+            print(f'[INFO] Creating MediaPipe Hands instance...')
+            hands = mp_hands.Hands(
+                static_image_mode=False, 
+                max_num_hands=1,
+                min_detection_confidence=0.5, 
+                min_tracking_confidence=0.5,
+                model_complexity=0  # Use lighter model for deployment
+            )
+            print('[INFO] MediaPipe enabled successfully!')
             return True
         except Exception as e:
             print(f'[ERROR] MediaPipe initialization failed: {e}')
-            return False
+            print(f'[ERROR] Exception type: {type(e)}')
+            import traceback
+            traceback.print_exc()
+            # Don't fail completely - try to continue without MediaPipe
+            print('[WARN] Continuing without MediaPipe - hand detection disabled')
+            hands = None
+            return True
     else:
-        print('[ERROR] MediaPipe not available')
-        return False
+        print('[ERROR] MediaPipe not available - hand detection disabled')
+        hands = None
+        return True
 
 def predict_from_image(image_data):
     """Process image exactly like opencv_demo.py"""
@@ -170,6 +208,11 @@ def predict_from_image(image_data):
         
         # Convert to RGB for MediaPipe (same as opencv_demo.py)
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        
+        # Check if MediaPipe is available
+        if hands is None:
+            return {"error": "MediaPipe not available - hand detection disabled"}
+        
         bbox = detect_hand_bbox(rgb, hands, w0, h0, padding=HAND_PADDING)
         
         if bbox:
@@ -805,8 +848,13 @@ def health():
         "status": "healthy",
         "model_loaded": model is not None,
         "mediapipe_loaded": hands is not None,
+        "mediapipe_available": MP_AVAILABLE,
         "deployment_ready": True,
-        "using_opencv_demo_logic": True
+        "using_opencv_demo_logic": True,
+        "model_path_exists": os.path.exists(MODEL_PATH),
+        "current_directory": os.getcwd(),
+        "python_version": sys.version,
+        "tensorflow_version": tf.__version__
     })
 
 @app.route('/api/info')
