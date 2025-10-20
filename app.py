@@ -58,24 +58,33 @@ def load_model_safe():
     except Exception as e1:
         print(f"[WARN] Normal loading failed: {str(e1)[:100]}")
         
-        # Method 2: Try with custom objects for compatibility
+        # Method 2: Try with safe_mode=False for compatibility
         try:
-            print("[INFO] Attempting with custom objects...")
-            custom_objects = {
-                'InputLayer': tf.keras.layers.InputLayer,
-                'Dense': tf.keras.layers.Dense,
-                'Conv2D': tf.keras.layers.Conv2D,
-                'MaxPooling2D': tf.keras.layers.MaxPooling2D,
-                'Flatten': tf.keras.layers.Flatten,
-                'Dropout': tf.keras.layers.Dropout
-            }
-            model = tf.keras.models.load_model(MODEL_PATH, compile=False, custom_objects=custom_objects)
-            print("[INFO] ✅ Model loaded with custom objects!")
+            print("[INFO] Attempting with safe_mode=False...")
+            model = tf.keras.models.load_model(MODEL_PATH, compile=False, safe_mode=False)
+            print("[INFO] ✅ Model loaded with safe_mode=False!")
         except Exception as e2:
-            print(f"[ERROR] All loading methods failed")
-            print(f"[ERROR] Error 1: {str(e1)[:100]}")
-            print(f"[ERROR] Error 2: {str(e2)[:100]}")
-            return False
+            print(f"[WARN] Safe mode loading failed: {str(e2)[:100]}")
+            
+            # Method 3: Try with custom objects for batch_shape issue
+            try:
+                print("[INFO] Attempting with custom objects...")
+                custom_objects = {
+                    'InputLayer': tf.keras.layers.InputLayer,
+                    'Dense': tf.keras.layers.Dense,
+                    'Conv2D': tf.keras.layers.Conv2D,
+                    'MaxPooling2D': tf.keras.layers.MaxPooling2D,
+                    'Flatten': tf.keras.layers.Flatten,
+                    'Dropout': tf.keras.layers.Dropout
+                }
+                model = tf.keras.models.load_model(MODEL_PATH, compile=False, custom_objects=custom_objects)
+                print("[INFO] ✅ Model loaded with custom objects!")
+            except Exception as e3:
+                print(f"[ERROR] All loading methods failed")
+                print(f"[ERROR] Error 1: {str(e1)[:100]}")
+                print(f"[ERROR] Error 2: {str(e2)[:100]}")
+                print(f"[ERROR] Error 3: {str(e3)[:100]}")
+                return False
     
     # Get model info
     try:

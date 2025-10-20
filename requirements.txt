@@ -4,7 +4,7 @@ Werkzeug==2.3.7
 gunicorn==21.2.0
 
 # AI/ML libraries - optimized for deployment
-tensorflow-cpu==2.15.0
+tensorflow-cpu==2.16.1
 numpy==1.24.3
 opencv-python-headless==4.8.1.78
 Pillow==10.0.1
