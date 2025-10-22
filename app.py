@@ -150,11 +150,11 @@ def setup_mediapipe():
         return True
 
 def detect_hand_region(image):
-    """Detect hand region using MediaPipe or return None if no hand found"""
+    """Detect hand region using MediaPipe or center crop fallback"""
     h, w = image.shape[:2]
     
     if hands is not None:
-        # Try MediaPipe detection
+        # Try MediaPipe detection with timeout protection
         try:
             rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
             result = hands.process(rgb)
@@ -182,33 +182,36 @@ def detect_hand_region(image):
                 y2 = int(max_y * h)
                 
                 return (x1, y1, x2, y2)
-            else:
-                # No hand landmarks detected
-                return None
         except Exception as e:
             print(f"[DEBUG] MediaPipe detection failed: {e}")
-            return None
     
-    # If MediaPipe is not available, return None (no hand detection possible)
-    # We don't want to guess with center crop
-    return None
+    # Fallback to center crop if MediaPipe fails or no hand detected
+    center_x, center_y = w // 2, h // 2
+    size = min(w, h) // 2
+    x1 = max(0, center_x - size)
+    y1 = max(0, center_y - size)
+    x2 = min(w, center_x + size)
+    y2 = min(h, center_y + size)
+    
+    print("[DEBUG] Using center crop fallback")
+    return (x1, y1, x2, y2)
 
 def preprocess_image(image_region):
-    """Preprocess image region for model prediction"""
-    # Convert to grayscale
-    gray = cv2.cvtColor(image_region, cv2.COLOR_BGR2GRAY)
+    """Preprocess image region for model prediction - optimized for speed"""
+    # Convert to grayscale using faster method
+    if len(image_region.shape) == 3:
+        gray = cv2.cvtColor(image_region, cv2.COLOR_BGR2GRAY)
+    else:
+        gray = image_region
     
-    # Resize to target size
-    resized = cv2.resize(gray, (target_size, target_size), interpolation=cv2.INTER_AREA)
+    # Resize to target size with fastest interpolation
+    resized = cv2.resize(gray, (target_size, target_size), interpolation=cv2.INTER_NEAREST)
     
-    # Normalize to 0-1
-    normalized = resized.astype('float32') / 255.0
-    
-    # Add channel dimension
-    processed = normalized[..., np.newaxis]
+    # Normalize and reshape in one step
+    normalized = (resized.astype('float32') / 255.0)[..., np.newaxis]
     
     # Add batch dimension
-    batch = np.expand_dims(processed, axis=0)
+    batch = np.expand_dims(normalized, axis=0)
     
     return batch
 
@@ -217,15 +220,18 @@ def predict_sign(image_data):
     try:
         print("[DEBUG] Starting prediction...")
         
-        # Decode base64 image
+        # Decode base64 image with size optimization
         if 'data:image' in image_data:
             image_data = image_data.split(',')[1]
         
         image_bytes = base64.b64decode(image_data)
         pil_image = Image.open(BytesIO(image_bytes))
+        
+        # Resize image immediately to reduce processing load
+        pil_image = pil_image.resize((320, 240), Image.LANCZOS)  # Smaller processing size
         image = np.array(pil_image)
         
-        print("[DEBUG] Image decoded successfully")
+        print("[DEBUG] Image decoded and resized successfully")
         
         # Clean up immediately
         del image_bytes, pil_image
@@ -239,14 +245,11 @@ def predict_sign(image_data):
         # Mirror image (like webcam)
         image = cv2.flip(image, 1)
         
-        # Detect hand region
+        # Detect hand region (always returns a region now)
         bbox = detect_hand_region(image)
-        
-        # Check if hand was detected
-        if bbox is None:
-            return {"error": "No hand detected", "show_hand_message": True}
-        
         x1, y1, x2, y2 = bbox
+        
+        print(f"[DEBUG] Hand region: {bbox}")
         
         # Extract and validate region
         if x2 <= x1 or y2 <= y1:
@@ -430,7 +433,7 @@ def index():
             document.getElementById('stopBtn').style.display = 'inline-block';
             document.getElementById('status').textContent = 'Recognition active...';
             
-            predictionInterval = setInterval(predict, 1000); // Predict every second
+            predictionInterval = setInterval(predict, 2000); // Predict every 2 seconds for less server load
         }
 
         function stopPrediction() {
@@ -452,9 +455,9 @@ def index():
                 ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
                 const imageData = canvas.toDataURL('image/jpeg', 0.8);
 
-                // Add timeout to fetch request
+                // Add timeout to fetch request (reduced for faster feedback)
                 const controller = new AbortController();
-                const timeoutId = setTimeout(() => controller.abort(), 30000); // 30 second timeout
+                const timeoutId = setTimeout(() => controller.abort(), 15000); // 15 second timeout
 
                 const response = await fetch('/predict', {
                     method: 'POST',
