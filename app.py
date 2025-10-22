@@ -120,19 +120,78 @@ def load_model_safe():
         return False
 
 def setup_mediapipe():
-    """MediaPipe disabled for memory optimization"""
+    """Setup MediaPipe with minimal memory footprint"""
     global hands
     
-    # Skip MediaPipe initialization to save memory on Render
-    hands = None
-    print("[INFO] MediaPipe disabled for memory optimization - using center crop only")
-    return True
+    if not MP_AVAILABLE:
+        print("[WARN] MediaPipe not available, using center crop fallback")
+        return True
+    
+    try:
+        # Environment setup for minimal memory usage
+        os.environ['MEDIAPIPE_DISABLE_GPU'] = '1'
+        
+        mp_hands = mp.solutions.hands
+        hands = mp_hands.Hands(
+            static_image_mode=True,  # More memory efficient
+            max_num_hands=1,
+            min_detection_confidence=0.8,  # Higher threshold for faster processing
+            min_tracking_confidence=0.8,
+            model_complexity=0  # Lightest model
+        )
+        
+        print("[INFO] ✅ MediaPipe initialized with minimal memory mode!")
+        return True
+        
+    except Exception as e:
+        print(f"[WARN] MediaPipe setup failed: {e}")
+        print("[WARN] Will use center crop fallback")
+        hands = None
+        return True
 
 def detect_hand_region(image):
-    """Use center crop only - MediaPipe disabled for memory optimization"""
+    """Detect hand region using lightweight MediaPipe with fallback"""
     h, w = image.shape[:2]
     
-    # Always use center crop to save memory (no MediaPipe processing)
+    if hands is not None:
+        # Try MediaPipe detection with memory optimization
+        try:
+            # Process smaller image for MediaPipe to save memory
+            small_h, small_w = h // 2, w // 2
+            small_image = cv2.resize(image, (small_w, small_h))
+            rgb = cv2.cvtColor(small_image, cv2.COLOR_BGR2RGB)
+            
+            result = hands.process(rgb)
+            
+            if result.multi_hand_landmarks:
+                landmarks = result.multi_hand_landmarks[0]
+                xs = [lm.x for lm in landmarks.landmark]
+                ys = [lm.y for lm in landmarks.landmark]
+                
+                min_x, max_x = min(xs), max(xs)
+                min_y, max_y = min(ys), max(ys)
+                
+                # Add padding
+                dx = (max_x - min_x) * HAND_PADDING
+                dy = (max_y - min_y) * HAND_PADDING
+                
+                min_x = max(0.0, min_x - dx)
+                max_x = min(1.0, max_x + dx)
+                min_y = max(0.0, min_y - dy)
+                max_y = min(1.0, max_y + dy)
+                
+                # Scale coordinates back to original image size
+                x1 = int(min_x * w)
+                y1 = int(min_y * h)
+                x2 = int(max_x * w)
+                y2 = int(max_y * h)
+                
+                print("[DEBUG] MediaPipe hand detection successful")
+                return (x1, y1, x2, y2)
+        except Exception as e:
+            print(f"[DEBUG] MediaPipe detection failed: {e}")
+    
+    # Fallback to center crop if MediaPipe fails
     center_x, center_y = w // 2, h // 2
     size = min(w, h) // 2
     x1 = max(0, center_x - size)
@@ -140,7 +199,7 @@ def detect_hand_region(image):
     x2 = min(w, center_x + size)
     y2 = min(h, center_y + size)
     
-    print("[DEBUG] Using center crop (MediaPipe disabled for memory)")
+    print("[DEBUG] Using center crop fallback")
     return (x1, y1, x2, y2)
 
 def preprocess_image(image_region):
@@ -177,8 +236,8 @@ def predict_sign(image_data):
         image_bytes = base64.b64decode(image_data)
         pil_image = Image.open(BytesIO(image_bytes))
         
-        # Resize image immediately to reduce processing load (very small)
-        pil_image = pil_image.resize((160, 120), Image.LANCZOS)
+        # Resize image for balanced processing (not too small to lose hand detection accuracy)
+        pil_image = pil_image.resize((240, 180), Image.LANCZOS)
         image = np.array(pil_image)
         
         print("[DEBUG] Image decoded and resized successfully")
@@ -219,15 +278,19 @@ def predict_sign(image_data):
         # Clean up ROI
         del roi
         
-        # Predict with extreme memory optimization
+        # Predict with memory optimization
         print("[DEBUG] Starting model prediction...")
         
         # Force garbage collection before prediction
         gc.collect()
         
-        # Use the most memory-efficient prediction method
-        with tf.device('/CPU:0'):  # Ensure CPU usage
-            predictions = model(processed, training=False).numpy()[0]
+        # Use memory-efficient prediction
+        try:
+            predictions = model.predict(processed, batch_size=1, verbose=0)[0]
+        except Exception as e:
+            print(f"[WARN] Standard prediction failed: {e}, trying alternative method")
+            with tf.device('/CPU:0'):
+                predictions = model(processed, training=False).numpy()[0]
         
         print("[DEBUG] Model prediction completed")
         
