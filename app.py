@@ -215,6 +215,8 @@ def preprocess_image(image_region):
 def predict_sign(image_data):
     """Main prediction function with memory optimization"""
     try:
+        print("[DEBUG] Starting prediction...")
+        
         # Decode base64 image
         if 'data:image' in image_data:
             image_data = image_data.split(',')[1]
@@ -222,6 +224,8 @@ def predict_sign(image_data):
         image_bytes = base64.b64decode(image_data)
         pil_image = Image.open(BytesIO(image_bytes))
         image = np.array(pil_image)
+        
+        print("[DEBUG] Image decoded successfully")
         
         # Clean up immediately
         del image_bytes, pil_image
@@ -262,7 +266,9 @@ def predict_sign(image_data):
         del roi
         
         # Predict with minimal memory usage
+        print("[DEBUG] Starting model prediction...")
         predictions = model.predict(processed, batch_size=1, verbose=0)[0]
+        print("[DEBUG] Model prediction completed")
         
         # Clean up processed array immediately
         del processed
@@ -287,6 +293,8 @@ def predict_sign(image_data):
         
         # Force garbage collection to free memory
         gc.collect()
+        
+        print("[DEBUG] Prediction completed successfully")
         
         return {
             "success": True,
@@ -444,11 +452,18 @@ def index():
                 ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
                 const imageData = canvas.toDataURL('image/jpeg', 0.8);
 
+                // Add timeout to fetch request
+                const controller = new AbortController();
+                const timeoutId = setTimeout(() => controller.abort(), 30000); // 30 second timeout
+
                 const response = await fetch('/predict', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ image: imageData })
+                    body: JSON.stringify({ image: imageData }),
+                    signal: controller.signal
                 });
+
+                clearTimeout(timeoutId);
 
                 const result = await response.json();
 
@@ -495,7 +510,14 @@ def index():
                     }
                 }
             } catch (error) {
-                document.getElementById('error').textContent = 'Connection error. Please refresh the page.';
+                console.error('Prediction error:', error);
+                if (error.name === 'AbortError') {
+                    document.getElementById('error').textContent = 'Request timed out. Server may be overloaded.';
+                } else if (error.message.includes('Failed to fetch')) {
+                    document.getElementById('error').textContent = 'Connection lost. Checking server status...';
+                } else {
+                    document.getElementById('error').textContent = 'Connection error. Please refresh the page.';
+                }
                 document.getElementById('error').style.display = 'block';
             }
         }
@@ -509,18 +531,30 @@ def index():
 
 @app.route('/predict', methods=['POST'])
 def predict():
-    if not initialization_success:
-        return jsonify({"error": "Server not properly initialized"}), 500
-    
-    if model is None:
-        return jsonify({"error": "Model not loaded"}), 500
-    
-    data = request.get_json()
-    if not data or 'image' not in data:
-        return jsonify({"error": "No image data provided"}), 400
-    
-    result = predict_sign(data['image'])
-    return jsonify(result)
+    try:
+        print("[DEBUG] Received prediction request")
+        
+        if not initialization_success:
+            print("[ERROR] Server not properly initialized")
+            return jsonify({"error": "Server not properly initialized"}), 500
+        
+        if model is None:
+            print("[ERROR] Model not loaded")
+            return jsonify({"error": "Model not loaded"}), 500
+        
+        data = request.get_json()
+        if not data or 'image' not in data:
+            print("[ERROR] No image data provided")
+            return jsonify({"error": "No image data provided"}), 400
+        
+        print("[DEBUG] Processing prediction...")
+        result = predict_sign(data['image'])
+        print("[DEBUG] Returning result")
+        return jsonify(result)
+        
+    except Exception as e:
+        print(f"[ERROR] Prediction endpoint failed: {str(e)}")
+        return jsonify({"error": f"Prediction failed: {str(e)}"}), 500
 
 @app.route('/health')
 def health():
