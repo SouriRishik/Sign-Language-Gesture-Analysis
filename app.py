@@ -1,425 +1,373 @@
 import os
 import sys
 import base64
-import gc  # For garbage collection
 from io import BytesIO
-import numpy as np
 from PIL import Image
 import cv2
+import numpy as np
 from flask import Flask, request, jsonify, render_template_string
 
 # Import TensorFlow with error handling
 try:
     import tensorflow as tf
-    print(f"[INFO] TensorFlow version: {tf.__version__}")
-    
-    # Configure TensorFlow for minimal memory usage
-    try:
-        # Force CPU usage for memory efficiency on Render
-        tf.config.set_visible_devices([], 'GPU')
-        
-        # Limit parallelism to reduce memory overhead
-        tf.config.threading.set_inter_op_parallelism_threads(1)
-        tf.config.threading.set_intra_op_parallelism_threads(1)
-        
-        print("[INFO] TensorFlow memory optimization applied")
-        
-    except Exception as e:
-        print(f"[WARN] TensorFlow optimization failed: {e}")
-        
+    print(f"TensorFlow {tf.__version__} loaded")
 except ImportError:
-    print('[ERROR] TensorFlow not installed')
+    print('ERROR: TensorFlow not installed')
     sys.exit(1)
 
 # Import MediaPipe with fallback
 try:
     import mediapipe as mp
     MP_AVAILABLE = True
-    print("[INFO] MediaPipe available")
+    print("MediaPipe available")
 except ImportError:
     MP_AVAILABLE = False
-    print("[WARN] MediaPipe not available - will use center crop")
+    print("MediaPipe not available")
 
-# Configuration
+# EXACT SAME CONSTANTS FROM opencv_demo.py
 MODEL_PATH = 'cnn_sign_language_model.h5'
 MIN_CONFIDENCE = 0.5
-HAND_PADDING = 0.15  # Reduced for less processing
-ASL_LABELS = ['A','B','C','D','E','F','G','H','I','K','L','M','N','O','P','Q','R','S','T','U','V','W','X','Y']
-
-# Disable TensorFlow warnings and optimize for deployment
-os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'  # Suppress more logs
-os.environ['TF_FORCE_GPU_ALLOW_GROWTH'] = 'true'
-tf.get_logger().setLevel('ERROR')
+HAND_PADDING = 0.35
+DEFAULT_LABELS_24 = ['A','B','C','D','E','F','G','H','I','K','L','M','N','O','P','Q','R','S','T','U','V','W','X','Y']
 
 # Global variables
 app = Flask(__name__)
 model = None
 hands = None
 target_size = None
+labels = None
 
-def load_model_safe():
-    """Load the .h5 model with multiple compatibility methods"""
-    global model, target_size
+def load_labels(num_classes: int):
+    """Exact same function from opencv_demo.py"""
+    if num_classes == 24:
+        return DEFAULT_LABELS_24
+    return [str(i) for i in range(num_classes)]
+
+def preprocess_roi(bgr: np.ndarray, size: int):
+    """Exact same function from opencv_demo.py - simplified"""
+    # Convert to grayscale
+    g = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+    g = cv2.resize(g, (size, size), interpolation=cv2.INTER_AREA)
+    arr = g[..., None]  # Add channel dimension
+    return (arr.astype('float32') / 255.0)
+
+def detect_hand_bbox(frame_rgb, hands, w, h, padding=HAND_PADDING):
+    """Exact same function from opencv_demo.py"""
+    result = hands.process(frame_rgb)
+    if not result.multi_hand_landmarks:
+        return None
+    lm = result.multi_hand_landmarks[0]
+    xs = [p.x for p in lm.landmark]
+    ys = [p.y for p in lm.landmark]
+    min_x, max_x = min(xs), max(xs)
+    min_y, max_y = min(ys), max(ys)
+    dx = (max_x - min_x) * padding
+    dy = (max_y - min_y) * padding
+    min_x = max(0.0, min_x - dx)
+    max_x = min(1.0, max_x + dx)
+    min_y = max(0.0, min_y - dy)
+    max_y = min(1.0, max_y + dy)
+    return int(min_x * w), int(min_y * h), int(max_x * w), int(max_y * h)
+
+def initialize_app():
+    """Initialize exactly like opencv_demo.py main()"""
+    global model, hands, target_size, labels
     
-    print(f"[INFO] Loading model: {MODEL_PATH}")
+    print("🚀 Initializing Sign Language Recognition...")
     
+    # Check model file
     if not os.path.exists(MODEL_PATH):
-        print(f"[ERROR] Model file not found: {MODEL_PATH}")
+        print(f'ERROR: Model file not found: {MODEL_PATH}')
         return False
     
-    # Method 1: Try loading normally
+    # Load model
+    print(f'Loading model: {MODEL_PATH}')
     try:
-        print("[INFO] Attempting normal model loading...")
-        model = tf.keras.models.load_model(MODEL_PATH, compile=False)
-        print("[INFO] ✅ Model loaded successfully!")
-    except Exception as e1:
-        print(f"[WARN] Normal loading failed: {str(e1)[:100]}")
-        
-        # Method 2: Try with safe_mode=False for compatibility
-        try:
-            print("[INFO] Attempting with safe_mode=False...")
-            model = tf.keras.models.load_model(MODEL_PATH, compile=False, safe_mode=False)
-            print("[INFO] ✅ Model loaded with safe_mode=False!")
-        except Exception as e2:
-            print(f"[WARN] Safe mode loading failed: {str(e2)[:100]}")
-            
-            # Method 3: Try with custom objects for batch_shape issue
-            try:
-                print("[INFO] Attempting with custom objects...")
-                custom_objects = {
-                    'InputLayer': tf.keras.layers.InputLayer,
-                    'Dense': tf.keras.layers.Dense,
-                    'Conv2D': tf.keras.layers.Conv2D,
-                    'MaxPooling2D': tf.keras.layers.MaxPooling2D,
-                    'Flatten': tf.keras.layers.Flatten,
-                    'Dropout': tf.keras.layers.Dropout
-                }
-                model = tf.keras.models.load_model(MODEL_PATH, compile=False, custom_objects=custom_objects)
-                print("[INFO] ✅ Model loaded with custom objects!")
-            except Exception as e3:
-                print(f"[ERROR] All loading methods failed")
-                print(f"[ERROR] Error 1: {str(e1)[:100]}")
-                print(f"[ERROR] Error 2: {str(e2)[:100]}")
-                print(f"[ERROR] Error 3: {str(e3)[:100]}")
-                return False
-    
-    # Get model info
-    try:
-        input_shape = model.inputs[0].shape
-        output_shape = model.outputs[0].shape
-        target_size = int(input_shape[1])  # Assuming square input
-        
-        print(f"[INFO] Model input shape: {input_shape}")
-        print(f"[INFO] Model output shape: {output_shape}")
-        print(f"[INFO] Target size: {target_size}")
-        print(f"[INFO] Expected classes: {len(ASL_LABELS)}")
-        
-        return True
+        model = tf.keras.models.load_model(MODEL_PATH)
+        print("✅ Model loaded successfully")
     except Exception as e:
-        print(f"[ERROR] Failed to get model info: {e}")
+        print(f"❌ Model loading failed: {e}")
         return False
-
-def setup_mediapipe():
-    """Setup MediaPipe with minimal memory footprint"""
-    global hands
     
-    if not MP_AVAILABLE:
-        print("[WARN] MediaPipe not available, using center crop fallback")
-        return True
+    # Get model info (same as opencv_demo.py)
+    in_shape = model.inputs[0].shape
+    if len(in_shape) != 4:
+        print('ERROR: Unexpected input shape:', in_shape)
+        return False
     
-    try:
-        # Environment setup for minimal memory usage
-        os.environ['MEDIAPIPE_DISABLE_GPU'] = '1'
-        
+    _, H, W, C = in_shape
+    target_size = int(min(H, W))
+    num_classes = int(model.outputs[0].shape[-1])
+    labels = load_labels(num_classes)
+    print(f'Model info: {num_classes} classes -> {labels}')
+    print(f'Target size: {target_size}x{target_size}')
+    
+    # Setup MediaPipe (same as opencv_demo.py)
+    if MP_AVAILABLE:
         mp_hands = mp.solutions.hands
         hands = mp_hands.Hands(
-            static_image_mode=True,  # More memory efficient
+            static_image_mode=False, 
             max_num_hands=1,
-            min_detection_confidence=0.8,  # Higher threshold for faster processing
-            min_tracking_confidence=0.8,
-            model_complexity=0  # Lightest model
+            min_detection_confidence=0.5, 
+            min_tracking_confidence=0.5
         )
-        
-        print("[INFO] ✅ MediaPipe initialized with minimal memory mode!")
+        print('✅ MediaPipe initialized')
         return True
-        
-    except Exception as e:
-        print(f"[WARN] MediaPipe setup failed: {e}")
-        print("[WARN] Will use center crop fallback")
-        hands = None
-        return True
-
-def detect_hand_region(image):
-    """Detect hand region using lightweight MediaPipe with fallback"""
-    h, w = image.shape[:2]
-    
-    if hands is not None:
-        # Try MediaPipe detection with memory optimization
-        try:
-            # Process smaller image for MediaPipe to save memory
-            small_h, small_w = h // 2, w // 2
-            small_image = cv2.resize(image, (small_w, small_h))
-            rgb = cv2.cvtColor(small_image, cv2.COLOR_BGR2RGB)
-            
-            result = hands.process(rgb)
-            
-            if result.multi_hand_landmarks:
-                landmarks = result.multi_hand_landmarks[0]
-                xs = [lm.x for lm in landmarks.landmark]
-                ys = [lm.y for lm in landmarks.landmark]
-                
-                min_x, max_x = min(xs), max(xs)
-                min_y, max_y = min(ys), max(ys)
-                
-                # Add padding
-                dx = (max_x - min_x) * HAND_PADDING
-                dy = (max_y - min_y) * HAND_PADDING
-                
-                min_x = max(0.0, min_x - dx)
-                max_x = min(1.0, max_x + dx)
-                min_y = max(0.0, min_y - dy)
-                max_y = min(1.0, max_y + dy)
-                
-                # Scale coordinates back to original image size
-                x1 = int(min_x * w)
-                y1 = int(min_y * h)
-                x2 = int(max_x * w)
-                y2 = int(max_y * h)
-                
-                print("[DEBUG] MediaPipe hand detection successful")
-                return (x1, y1, x2, y2)
-        except Exception as e:
-            print(f"[DEBUG] MediaPipe detection failed: {e}")
-    
-    # Fallback to center crop if MediaPipe fails
-    center_x, center_y = w // 2, h // 2
-    size = min(w, h) // 2
-    x1 = max(0, center_x - size)
-    y1 = max(0, center_y - size)
-    x2 = min(w, center_x + size)
-    y2 = min(h, center_y + size)
-    
-    print("[DEBUG] Using center crop fallback")
-    return (x1, y1, x2, y2)
-
-def preprocess_image(image_region):
-    """Preprocess image region for model prediction - optimized for speed"""
-    # Convert to grayscale using faster method
-    if len(image_region.shape) == 3:
-        gray = cv2.cvtColor(image_region, cv2.COLOR_BGR2GRAY)
     else:
-        gray = image_region
-    
-    # Resize to target size with fastest interpolation
-    resized = cv2.resize(gray, (target_size, target_size), interpolation=cv2.INTER_NEAREST)
-    
-    # Normalize and reshape in one step
-    normalized = (resized.astype('float32') / 255.0)[..., np.newaxis]
-    
-    # Add batch dimension
-    batch = np.expand_dims(normalized, axis=0)
-    
-    return batch
+        print('❌ MediaPipe not available')
+        return False
 
-def predict_sign(image_data):
-    """Main prediction function with aggressive memory optimization"""
+def predict_from_image(image_data):
+    """Process image using exact opencv_demo.py logic"""
     try:
-        print("[DEBUG] Starting prediction with memory optimization...")
-        
-        # Force garbage collection at start
-        gc.collect()
-        
-        # Decode base64 image with size optimization
+        # Decode base64 image
         if 'data:image' in image_data:
             image_data = image_data.split(',')[1]
         
         image_bytes = base64.b64decode(image_data)
-        pil_image = Image.open(BytesIO(image_bytes))
+        image = Image.open(BytesIO(image_bytes))
+        frame = np.array(image)
         
-        # Resize image for balanced processing (not too small to lose hand detection accuracy)
-        pil_image = pil_image.resize((240, 180), Image.LANCZOS)
-        image = np.array(pil_image)
+        # Convert RGB to BGR for OpenCV (same as opencv_demo.py)
+        if len(frame.shape) == 3 and frame.shape[2] == 3:
+            frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
         
-        print("[DEBUG] Image decoded and resized successfully")
+        # Mirror the frame (same as opencv_demo.py DEFAULT_MIRROR=True)
+        frame = cv2.flip(frame, 1)
         
-        # Clean up immediately and force garbage collection
-        del image_bytes, pil_image
-        gc.collect()
+        h0, w0 = frame.shape[:2]
         
-        # Convert RGB to BGR for OpenCV
-        if len(image.shape) == 3 and image.shape[2] == 3:
-            image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+        # Convert to RGB for MediaPipe (same as opencv_demo.py)
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        bbox = detect_hand_bbox(rgb, hands, w0, h0, padding=HAND_PADDING)
+        
+        if bbox:
+            x1, y1, x2, y2 = bbox
+            x1 = max(0, x1)
+            y1 = max(0, y1) 
+            x2 = min(w0, x2)
+            y2 = min(h0, y2)
+            
+            if x2 > x1 and y2 > y1:
+                # Extract ROI and preprocess (exact same as opencv_demo.py)
+                roi = frame[y1:y2, x1:x2]
+                proc = preprocess_roi(roi, target_size)
+                batch = np.expand_dims(proc, 0)
+                
+                # Predict (same as opencv_demo.py)
+                probs = model.predict(batch, verbose=0)[0]
+                pred_idx = int(np.argmax(probs))
+                confidence = float(probs[pred_idx])
+                
+                # Get top 3 predictions for display
+                top3_indices = np.argsort(probs)[-3:][::-1]
+                top3_predictions = [
+                    {
+                        "letter": labels[i] if i < len(labels) else str(i),
+                        "confidence": float(probs[i])
+                    }
+                    for i in top3_indices
+                ]
+                
+                return {
+                    "success": True,
+                    "prediction": labels[pred_idx] if pred_idx < len(labels) else str(pred_idx),
+                    "confidence": confidence,
+                    "top3": top3_predictions,
+                    "bbox": [x1, y1, x2, y2],
+                    "meets_confidence": confidence >= MIN_CONFIDENCE
+                }
+            else:
+                return {"error": "Invalid bounding box"}
         else:
-            return {"error": "Invalid image format"}
-        
-        # Mirror image (like webcam)
-        image = cv2.flip(image, 1)
-        
-        # Detect hand region (always returns a region now)
-        bbox = detect_hand_region(image)
-        x1, y1, x2, y2 = bbox
-        
-        print(f"[DEBUG] Hand region: {bbox}")
-        
-        # Extract and validate region
-        if x2 <= x1 or y2 <= y1:
-            return {"error": "Invalid hand region"}
-        
-        roi = image[y1:y2, x1:x2]
-        if roi.size == 0:
-            return {"error": "Empty hand region"}
-        
-        # Clean up large image array
-        del image
-        
-        # Preprocess for model
-        processed = preprocess_image(roi)
-        
-        # Clean up ROI
-        del roi
-        
-        # Predict with memory optimization
-        print("[DEBUG] Starting model prediction...")
-        
-        # Force garbage collection before prediction
-        gc.collect()
-        
-        # Use memory-efficient prediction
-        try:
-            predictions = model.predict(processed, batch_size=1, verbose=0)[0]
-        except Exception as e:
-            print(f"[WARN] Standard prediction failed: {e}, trying alternative method")
-            with tf.device('/CPU:0'):
-                predictions = model(processed, training=False).numpy()[0]
-        
-        print("[DEBUG] Model prediction completed")
-        
-        # Clean up processed array immediately
-        del processed
-        gc.collect()  # Force cleanup
-        
-        # Get results efficiently
-        pred_idx = np.argmax(predictions)
-        confidence = float(predictions[pred_idx])
-        predicted_letter = ASL_LABELS[pred_idx] if pred_idx < len(ASL_LABELS) else f"Class_{pred_idx}"
-        
-        # Get top 3 predictions
-        top3_indices = np.argsort(predictions)[-3:][::-1]
-        top3_predictions = [
-            {
-                "letter": ASL_LABELS[i] if i < len(ASL_LABELS) else f"Class_{i}",
-                "confidence": float(predictions[i])
-            }
-            for i in top3_indices
-        ]
-        
-        # Clean up prediction arrays
-        del predictions, top3_indices
-        
-        # Force garbage collection to free memory
-        gc.collect()
-        
-        print("[DEBUG] Prediction completed successfully")
-        
-        return {
-            "success": True,
-            "prediction": predicted_letter,
-            "confidence": confidence,
-            "meets_confidence": confidence >= MIN_CONFIDENCE,
-            "top3": top3_predictions,
-            "bbox": [x1, y1, x2, y2],
-            "detection_method": "mediapipe" if hands else "center_crop"
-        }
-        
+            return {"error": "No hand detected"}
+            
     except Exception as e:
-        return {"error": f"Prediction failed: {str(e)}"}
+        return {"error": f"Processing failed: {str(e)}"}
 
-# Initialize everything when module loads (for Gunicorn)
-def initialize():
-    """Initialize model and MediaPipe"""
-    print("🚀 Initializing ASL Recognition Server...")
-    
-    # Setup TensorFlow
-    try:
-        # Limit memory growth
-        gpus = tf.config.list_physical_devices('GPU')
-        for gpu in gpus:
-            tf.config.experimental.set_memory_growth(gpu, True)
-    except:
-        pass
-    
-    # Load model
-    if not load_model_safe():
-        print("❌ Model loading failed!")
-        return False
-    
-    # Setup MediaPipe
-    if not setup_mediapipe():
-        print("❌ MediaPipe setup failed!")
-        return False
-    
-    print("✅ Initialization complete!")
-    return True
-
-# Initialize when imported
-initialization_success = initialize()
-
-# Flask routes
-@app.route('/')
-def index():
-    return '''
+# Simple HTML template
+HTML_TEMPLATE = '''
 <!DOCTYPE html>
 <html>
 <head>
-    <title>🤟 ASL Recognition</title>
+    <title>🤟 ASL Recognition - Clean Version</title>
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <style>
-        body { font-family: Arial, sans-serif; margin: 20px; background: #f0f8ff; }
-        .container { max-width: 800px; margin: 0 auto; background: white; padding: 20px; border-radius: 10px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
-        h1 { text-align: center; color: #333; }
-        .video-container { position: relative; display: flex; justify-content: center; margin-left: 40px; }
-        video { width: 100%; max-width: 640px; border-radius: 10px; transform: scaleX(-1); }
+        body { 
+            font-family: Arial, sans-serif; 
+            margin: 0; 
+            padding: 20px; 
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white; 
+            min-height: 100vh;
+        }
+        .container { 
+            max-width: 900px; 
+            margin: 0 auto; 
+            background: rgba(255,255,255,0.1);
+            padding: 20px; 
+            border-radius: 15px;
+            backdrop-filter: blur(10px);
+        }
+        h1 { 
+            text-align: center; 
+            margin-bottom: 30px;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
+        }
+        .main-grid {
+            display: grid;
+            grid-template-columns: 2fr 1fr;
+            gap: 20px;
+            align-items: start;
+        }
+        .video-section {
+            text-align: center;
+        }
+        video { 
+            width: 100%; 
+            max-width: 500px; 
+            border-radius: 10px;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.3);
+            transform: scaleX(-1);
+        }
         canvas { display: none; }
-        .controls { margin: 20px 0; text-align: center; }
-        button { padding: 12px 24px; margin: 10px; border: none; border-radius: 25px; font-size: 16px; cursor: pointer; }
-        .start-btn { background: #4CAF50; color: white; }
-        .stop-btn { background: #f44336; color: white; }
-        .results { margin-top: 20px; padding: 20px; background: #f9f9f9; border-radius: 10px; }
-        .prediction { font-size: 24px; font-weight: bold; margin: 10px 0; }
-        .top3-predictions { margin-top: 15px; }
-        .prediction-item { display: flex; justify-content: space-between; align-items: center; padding: 8px 12px; margin: 5px 0; background: white; border-radius: 8px; border-left: 4px solid #ddd; }
-        .prediction-item.rank-1 { border-left-color: #4CAF50; font-weight: bold; }
-        .prediction-item.rank-2 { border-left-color: #FF9800; }
-        .prediction-item.rank-3 { border-left-color: #2196F3; }
-        .letter { font-size: 18px; font-weight: bold; }
-        .percentage { font-size: 14px; color: #666; }
-        .confidence { margin: 10px 0; }
-        .error { color: red; font-weight: bold; }
-        .success { color: green; }
+        .controls { 
+            margin: 15px 0; 
+        }
+        button { 
+            padding: 12px 24px; 
+            margin: 5px; 
+            border: none; 
+            border-radius: 25px; 
+            font-size: 16px; 
+            cursor: pointer;
+            font-weight: bold;
+            transition: all 0.3s;
+        }
+        .start-btn { 
+            background: linear-gradient(45deg, #28a745, #20c997); 
+            color: white; 
+        }
+        .stop-btn { 
+            background: linear-gradient(45deg, #dc3545, #fd7e14); 
+            color: white; 
+        }
+        button:hover { transform: translateY(-2px); }
+        .results-panel {
+            background: rgba(255,255,255,0.15);
+            padding: 20px;
+            border-radius: 10px;
+            backdrop-filter: blur(5px);
+        }
+        .status { 
+            text-align: center; 
+            font-size: 1.1em; 
+            margin-bottom: 15px;
+            padding: 10px;
+            background: rgba(255,255,255,0.1);
+            border-radius: 8px;
+        }
+        .prediction-display {
+            text-align: center;
+            margin: 20px 0;
+        }
+        .current-letter { 
+            font-size: 4em; 
+            font-weight: bold; 
+            margin: 15px 0;
+            color: #feca57;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.5);
+        }
+        .confidence { 
+            font-size: 1.4em; 
+            margin: 10px 0; 
+        }
+        .confidence.good { color: #28a745; }
+        .confidence.poor { color: #ff6b6b; }
+        .top3 { margin-top: 20px; }
+        .top3 h4 { 
+            text-align: center; 
+            color: #feca57; 
+            margin-bottom: 15px;
+        }
+        .pred-item { 
+            display: flex; 
+            justify-content: space-between; 
+            padding: 8px 12px; 
+            margin: 5px 0; 
+            background: rgba(255,255,255,0.1);
+            border-radius: 6px;
+            border-left: 3px solid transparent;
+        }
+        .pred-item.rank-1 { border-left-color: #feca57; }
+        .pred-item.rank-2 { border-left-color: #ff9f43; }
+        .pred-item.rank-3 { border-left-color: #54a0ff; }
+        .error { 
+            color: #ff6b6b; 
+            background: rgba(255,107,107,0.2);
+            padding: 15px; 
+            border-radius: 8px; 
+            margin: 10px 0;
+            text-align: center;
+        }
+        .no-hand {
+            text-align: center;
+            color: #ff9f43;
+            font-style: italic;
+            margin: 20px 0;
+        }
+        @media (max-width: 768px) {
+            .main-grid { grid-template-columns: 1fr; }
+        }
     </style>
 </head>
 <body>
     <div class="container">
-        <h1>🤟 ASL Recognition</h1>
-        <div class="video-container">
-            <video id="video" autoplay playsinline muted></video>
-        </div>
-        <canvas id="canvas"></canvas>
+        <h1>🤟 Sign Language Recognition</h1>
+        <p style="text-align: center; margin-bottom: 20px; color: #feca57;">
+            Using exact opencv_demo.py detection logic
+        </p>
         
-        <div class="controls">
-            <button id="startBtn" class="start-btn" onclick="startPrediction()">Start Recognition</button>
-            <button id="stopBtn" class="stop-btn" onclick="stopPrediction()" style="display: none;">Stop</button>
-        </div>
-        
-        <div class="results">
-            <div id="status">Camera ready - Click Start to begin</div>
-            <div id="prediction" class="prediction" style="display: none;"></div>
-            <div id="confidence" class="confidence" style="display: none;"></div>
-            <div id="top3-predictions" class="top3-predictions" style="display: none;">
-                <h4 style="margin: 15px 0 10px 0; color: #333;">📊 Top 3 Predictions:</h4>
-                <div id="top3-list"></div>
+        <div class="main-grid">
+            <div class="video-section">
+                <video id="video" autoplay playsinline muted></video>
+                <canvas id="canvas"></canvas>
+                
+                <div class="controls">
+                    <button id="startBtn" class="start-btn" onclick="startPrediction()">
+                        🎯 Start Recognition
+                    </button>
+                    <button id="stopBtn" class="stop-btn" onclick="stopPrediction()" style="display: none;">
+                        ⏹️ Stop
+                    </button>
+                </div>
             </div>
-            <div id="error" class="error" style="display: none;"></div>
+            
+            <div class="results-panel">
+                <div id="status" class="status">
+                    📷 Camera ready - Click Start
+                </div>
+                
+                <div id="prediction-display" class="prediction-display" style="display: none;">
+                    <div id="current-letter" class="current-letter">-</div>
+                    <div id="confidence" class="confidence">0%</div>
+                </div>
+                
+                <div id="no-hand" class="no-hand" style="display: none;">
+                    👋 Show your hand to camera
+                </div>
+                
+                <div id="top3" class="top3" style="display: none;">
+                    <h4>📊 Live Predictions</h4>
+                    <div id="top3-list"></div>
+                </div>
+                
+                <div id="error" class="error" style="display: none;"></div>
+            </div>
+        </div>
+        
+        <div style="margin-top: 20px; text-align: center; font-size: 0.9em; opacity: 0.8;">
+            <p><strong>Letters:</strong> A-Y (excluding J, Z) • <strong>Confidence:</strong> ≥50% for green</p>
         </div>
     </div>
 
@@ -427,170 +375,176 @@ def index():
         const video = document.getElementById('video');
         const canvas = document.getElementById('canvas');
         const ctx = canvas.getContext('2d');
+        
         let predictionActive = false;
         let predictionInterval = null;
-
+        
         // Initialize camera
         async function initCamera() {
             try {
                 const stream = await navigator.mediaDevices.getUserMedia({ 
-                    video: { width: 640, height: 480, facingMode: 'user' } 
+                    video: { 
+                        width: { ideal: 640 },
+                        height: { ideal: 480 },
+                        facingMode: 'user'
+                    } 
                 });
                 video.srcObject = stream;
                 
                 video.addEventListener('loadedmetadata', () => {
                     canvas.width = video.videoWidth;
                     canvas.height = video.videoHeight;
-                    document.getElementById('status').textContent = 'Camera ready - Click Start to begin';
                 });
+                
             } catch (err) {
-                document.getElementById('error').textContent = 'Camera access denied. Please allow camera access.';
-                document.getElementById('error').style.display = 'block';
+                showError('Camera access denied. Please allow camera and refresh.');
             }
         }
-
+        
+        function showError(message) {
+            document.getElementById('error').textContent = message;
+            document.getElementById('error').style.display = 'block';
+        }
+        
+        function updateStatus(message) {
+            document.getElementById('status').textContent = message;
+        }
+        
         function startPrediction() {
             predictionActive = true;
             document.getElementById('startBtn').style.display = 'none';
             document.getElementById('stopBtn').style.display = 'inline-block';
-            document.getElementById('status').textContent = 'Recognition active...';
+            document.getElementById('prediction-display').style.display = 'block';
+            document.getElementById('top3').style.display = 'block';
+            updateStatus('🔄 Recognition active');
             
-            predictionInterval = setInterval(predict, 2000); // Predict every 2 seconds for less server load
+            // Predict every 600ms for smooth real-time feel
+            predictionInterval = setInterval(predict, 600);
         }
-
+        
         function stopPrediction() {
             predictionActive = false;
             clearInterval(predictionInterval);
             document.getElementById('startBtn').style.display = 'inline-block';
             document.getElementById('stopBtn').style.display = 'none';
-            document.getElementById('status').textContent = 'Recognition stopped';
-            document.getElementById('prediction').style.display = 'none';
-            document.getElementById('confidence').style.display = 'none';
-            document.getElementById('top3-predictions').style.display = 'none';
+            document.getElementById('prediction-display').style.display = 'none';
+            document.getElementById('top3').style.display = 'none';
+            document.getElementById('no-hand').style.display = 'none';
             document.getElementById('error').style.display = 'none';
+            updateStatus('⏸️ Recognition stopped');
         }
-
+        
         async function predict() {
             if (!predictionActive) return;
-
+            
             try {
                 ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
                 const imageData = canvas.toDataURL('image/jpeg', 0.8);
-
-                // Add timeout to fetch request (reduced for faster feedback)
-                const controller = new AbortController();
-                const timeoutId = setTimeout(() => controller.abort(), 15000); // 15 second timeout
-
+                
                 const response = await fetch('/predict', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ image: imageData }),
-                    signal: controller.signal
+                    body: JSON.stringify({image: imageData}),
+                    signal: AbortSignal.timeout(3000) // 3 second timeout
                 });
-
-                clearTimeout(timeoutId);
-
+                
                 const result = await response.json();
-
+                
                 if (result.error) {
-                    // Handle "no hand detected" differently from other errors
-                    if (result.show_hand_message) {
-                        document.getElementById('status').textContent = '👋 Show your hand to the camera';
-                        document.getElementById('error').style.display = 'none';
-                    } else {
-                        document.getElementById('error').textContent = result.error;
-                        document.getElementById('error').style.display = 'block';
-                    }
-                    document.getElementById('prediction').style.display = 'none';
-                    document.getElementById('confidence').style.display = 'none';
-                } else {
-                    document.getElementById('error').style.display = 'none';
-                    document.getElementById('status').textContent = 'Recognition active...';
-                    
-                    // Show main prediction
-                    document.getElementById('prediction').textContent = `🏆 Best: ${result.prediction}`;
-                    document.getElementById('prediction').style.display = 'block';
-                    document.getElementById('confidence').textContent = `Confidence: ${(result.confidence * 100).toFixed(1)}%`;
-                    document.getElementById('confidence').style.display = 'block';
-                    document.getElementById('confidence').className = result.meets_confidence ? 'confidence success' : 'confidence';
-                    
-                    // Show top 3 predictions
-                    if (result.top3 && result.top3.length > 0) {
-                        const top3List = document.getElementById('top3-list');
-                        top3List.innerHTML = '';
-                        
-                        result.top3.forEach((pred, index) => {
-                            const item = document.createElement('div');
-                            item.className = `prediction-item rank-${index + 1}`;
-                            item.innerHTML = `
-                                <span class="letter">${index + 1}. ${pred.letter}</span>
-                                <span class="percentage">${(pred.confidence * 100).toFixed(1)}%</span>
-                            `;
-                            top3List.appendChild(item);
-                        });
-                        
-                        document.getElementById('top3-predictions').style.display = 'block';
-                    } else {
-                        document.getElementById('top3-predictions').style.display = 'none';
-                    }
+                    showNoHand();
+                } else if (result.success) {
+                    showPrediction(result);
                 }
+                
             } catch (error) {
                 console.error('Prediction error:', error);
-                if (error.name === 'AbortError') {
-                    document.getElementById('error').textContent = 'Request timed out. Server may be overloaded.';
-                } else if (error.message.includes('Failed to fetch')) {
-                    document.getElementById('error').textContent = 'Connection lost. Checking server status...';
-                } else {
-                    document.getElementById('error').textContent = 'Connection error. Please refresh the page.';
+                if (error.name !== 'AbortError') {
+                    showError('Connection error');
                 }
-                document.getElementById('error').style.display = 'block';
             }
         }
-
-        // Initialize camera on page load
-        document.addEventListener('DOMContentLoaded', initCamera);
+        
+        function showNoHand() {
+            document.getElementById('prediction-display').style.display = 'none';
+            document.getElementById('no-hand').style.display = 'block';
+            document.getElementById('error').style.display = 'none';
+        }
+        
+        function showPrediction(result) {
+            document.getElementById('prediction-display').style.display = 'block';
+            document.getElementById('no-hand').style.display = 'none';
+            document.getElementById('error').style.display = 'none';
+            
+            // Update main prediction
+            document.getElementById('current-letter').textContent = result.prediction;
+            const confidenceEl = document.getElementById('confidence');
+            confidenceEl.textContent = `${(result.confidence * 100).toFixed(1)}%`;
+            confidenceEl.className = `confidence ${result.meets_confidence ? 'good' : 'poor'}`;
+            
+            // Update top 3
+            const top3List = document.getElementById('top3-list');
+            top3List.innerHTML = '';
+            
+            result.top3.forEach((pred, index) => {
+                const item = document.createElement('div');
+                item.className = `pred-item rank-${index + 1}`;
+                item.innerHTML = `
+                    <span><strong>${pred.letter}</strong></span>
+                    <span>${(pred.confidence * 100).toFixed(1)}%</span>
+                `;
+                top3List.appendChild(item);
+            });
+        }
+        
+        // Initialize on page load
+        initCamera();
     </script>
 </body>
 </html>
-    '''
+'''
+
+@app.route('/')
+def index():
+    return HTML_TEMPLATE
 
 @app.route('/predict', methods=['POST'])
 def predict():
     try:
-        print("[DEBUG] Received prediction request")
-        
-        if not initialization_success:
-            print("[ERROR] Server not properly initialized")
-            return jsonify({"error": "Server not properly initialized"}), 500
-        
-        if model is None:
-            print("[ERROR] Model not loaded")
-            return jsonify({"error": "Model not loaded"}), 500
-        
         data = request.get_json()
-        if not data or 'image' not in data:
-            print("[ERROR] No image data provided")
-            return jsonify({"error": "No image data provided"}), 400
+        image_data = data.get('image', '')
         
-        print("[DEBUG] Processing prediction...")
-        result = predict_sign(data['image'])
-        print("[DEBUG] Returning result")
+        if not image_data:
+            return jsonify({"error": "No image data"}), 400
+        
+        result = predict_from_image(image_data)
         return jsonify(result)
         
     except Exception as e:
-        print(f"[ERROR] Prediction endpoint failed: {str(e)}")
-        return jsonify({"error": f"Prediction failed: {str(e)}"}), 500
+        return jsonify({"error": f"Server error: {str(e)}"}), 500
 
 @app.route('/health')
 def health():
     return jsonify({
-        "status": "healthy" if initialization_success else "unhealthy",
+        "status": "healthy",
         "model_loaded": model is not None,
-        "mediapipe_available": MP_AVAILABLE,
-        "mediapipe_initialized": hands is not None,
-        "tensorflow_version": tf.__version__
+        "mediapipe_loaded": hands is not None,
+        "using_opencv_demo_logic": True
     })
 
 if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 5000))
-    app.run(debug=True, host='0.0.0.0', port=port)
+    print("🚀 Starting Clean ASL Recognition Server...")
+    
+    if initialize_app():
+        print("✅ Server ready!")
+        print("🌐 Open: http://localhost:5000")
+        print("📱 Mobile: http://YOUR_IP:5000")
+        print("🎯 Uses EXACT opencv_demo.py logic!")
+        
+        # For deployment, use production settings
+        debug_mode = os.environ.get('FLASK_ENV') != 'production'
+        host = '0.0.0.0' if not debug_mode else '127.0.0.1'
+        
+        app.run(debug=debug_mode, host=host, port=int(os.environ.get('PORT', 5000)))
+    else:
+        print("❌ Failed to initialize")
+        sys.exit(1)
